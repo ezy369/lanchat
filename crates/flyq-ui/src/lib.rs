@@ -4,9 +4,15 @@
 //! - Sidebar showing online peers
 //! - Chat area for the selected conversation
 //! - Message input
+//!
+//! The UI consumes [`flyq_core::UiEvent`] items from the core event loop and
+//! renders them. Outgoing messages are dispatched through a shared
+//! [`flyq_core::EventHandler`]. Tokio-backed work (network I/O, database) is
+//! bridged into GPUI via the [`tokio_runtime`] module.
 
 pub mod app;
 pub mod chat;
 pub mod sidebar;
+pub mod tokio_runtime;
 
-pub use app::LanChatApp;
+pub use app::{ChatMsg, LanChatApp};

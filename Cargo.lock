@@ -2007,10 +2007,13 @@ name = "flyq-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "flyq-core",
+ "flyq-protocol",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "tokio",
  "tracing",
 ]
 

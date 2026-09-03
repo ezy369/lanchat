@@ -98,6 +98,11 @@ impl EventHandler {
         }
     }
 
+    /// Access the shared peer manager (e.g. to look up peer details).
+    pub fn peer_manager(&self) -> &PeerManager {
+        &self.peer_manager
+    }
+
     /// Process a discovery event from the network layer.
     pub async fn handle_discovery_event(&self, event: DiscoveryEvent) {
         match event {
@@ -363,8 +368,11 @@ fn now_timestamp() -> i64 {
 ///
 /// Consumes discovery events from `event_rx` and dispatches them through
 /// the `EventHandler`. Runs until the event channel is closed.
+///
+/// The handler is shared via [`Arc`] so the UI layer can also call into it
+/// (e.g. [`EventHandler::send_chat_message`]) while the loop is running.
 pub async fn run_event_loop(
-    handler: EventHandler,
+    handler: std::sync::Arc<EventHandler>,
     mut event_rx: mpsc::Receiver<DiscoveryEvent>,
 ) {
     info!("Event handler loop started");
