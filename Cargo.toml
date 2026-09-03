@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flyq-protocol",
+    "crates/flyq-network",
+    "crates/flyq-storage",
+    "crates/flyq-ui",
+    "crates/flyq-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/your-org/lanchat"
+
+[workspace.dependencies]
+# Internal crates
+flyq-protocol = { path = "crates/flyq-protocol" }
+flyq-network = { path = "crates/flyq-network" }
+flyq-storage = { path = "crates/flyq-storage" }
+flyq-ui = { path = "crates/flyq-ui" }
+flyq-core = { path = "crates/flyq-core" }
+
+# GPUI ecosystem
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Storage
+libsql = "0.6"
+
+# Networking
+if-addrs = "0.13"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+hostname = "0.4"
+
+[package]
+name = "lanchat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "lanchat"
+path = "src/main.rs"
+
+[dependencies]
+flyq-core.workspace = true
+flyq-ui.workspace = true
+flyq-network.workspace = true
+flyq-storage.workspace = true
+flyq-protocol.workspace = true
+
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

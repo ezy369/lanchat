@@ -1,0 +1,18 @@
+[package]
+name = "flyq-network"
+description = "LAN discovery and transport layer for LanChat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+flyq-protocol.workspace = true
+
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+if-addrs.workspace = true

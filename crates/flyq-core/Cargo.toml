@@ -1,0 +1,22 @@
+[package]
+name = "flyq-core"
+description = "Core business logic and application state for LanChat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+flyq-protocol.workspace = true
+flyq-network.workspace = true
+flyq-storage.workspace = true
+
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+hostname.workspace = true
