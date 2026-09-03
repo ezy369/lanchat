@@ -4,14 +4,43 @@
 //! into application-level actions: storing messages, sending receipts, and
 //! emitting UI events.
 
-use flyq_network::{DiscoveryEvent, MessageSender, PeerManager};
+use flyq_network::{
+    DiscoveryEvent, FileDownloader, FileOffer, FileRegistry, MessageSender, PeerManager,
+    ProgressCallback,
+};
 use flyq_protocol::command::flags;
 use flyq_protocol::{Command, Packet, PeerInfo};
-use flyq_storage::{Database, StoredMessage};
+use flyq_storage::{Database, Page, StoredMessage};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+/// A chat message loaded from local history (database).
+#[derive(Debug, Clone)]
+pub struct HistoryMsg {
+    /// Stored message id.
+    pub id: String,
+    /// Message text.
+    pub text: String,
+    /// Unix timestamp (seconds).
+    pub timestamp: i64,
+    /// True when we sent this message.
+    pub outgoing: bool,
+}
+
+/// A single file offered by a peer in an incoming message.
+#[derive(Debug, Clone)]
+pub struct IncomingFile {
+    /// The sender-assigned file ID (used to request the bytes over TCP).
+    pub file_id: u32,
+    /// Original filename.
+    pub filename: String,
+    /// Declared size in bytes.
+    pub size: u64,
+}
 
 /// Events emitted to the UI layer for rendering updates.
 #[derive(Debug, Clone)]
@@ -27,6 +56,8 @@ pub enum UiEvent {
         sender_addr: SocketAddr,
         content: String,
         timestamp: i64,
+        /// The sender-assigned packet number, used to acknowledge reads.
+        packet_no: u32,
     },
     /// A message was sent successfully (for confirming in UI).
     MessageSent {
@@ -34,6 +65,8 @@ pub enum UiEvent {
         recipient: String,
         content: String,
         timestamp: i64,
+        /// Our packet number, used to match delivery/read receipts.
+        packet_no: u32,
     },
     /// Delivery receipt received for a sent message.
     DeliveryConfirmed {
@@ -64,6 +97,39 @@ pub enum UiEvent {
     PeerStatusChanged {
         peer: PeerInfo,
     },
+    /// Conversation history loaded from the local database.
+    HistoryLoaded {
+        peer: SocketAddr,
+        messages: Vec<HistoryMsg>,
+    },
+    /// A peer sent a message with file attachments. The UI should prompt the
+    /// user to accept or reject each file.
+    FileOfferReceived {
+        from: SocketAddr,
+        name: String,
+        /// The chat message id the files arrived with (may be empty text).
+        msg_id: String,
+        files: Vec<IncomingFile>,
+    },
+    /// An incoming file transfer is progressing.
+    FileProgress {
+        transfer_id: String,
+        filename: String,
+        received: u64,
+        total: u64,
+    },
+    /// An incoming file transfer completed successfully.
+    FileComplete {
+        transfer_id: String,
+        filename: String,
+        path: PathBuf,
+    },
+    /// A file transfer failed.
+    FileFailed {
+        transfer_id: String,
+        filename: String,
+        error: String,
+    },
 }
 
 /// Application event handler that bridges network events to storage and UI.
@@ -78,6 +144,14 @@ pub struct EventHandler {
     sender: MessageSender,
     /// Channel to emit UI events.
     ui_tx: mpsc::Sender<UiEvent>,
+    /// Registry of files we offer for download to peers.
+    registry: FileRegistry,
+    /// Directory where incoming (accepted) files are saved.
+    download_dir: PathBuf,
+    /// Our display name, sent when requesting a file download.
+    local_name: String,
+    /// Our hostname, sent when requesting a file download.
+    local_host: String,
 }
 
 impl EventHandler {
@@ -88,6 +162,10 @@ impl EventHandler {
         peer_manager: PeerManager,
         sender: MessageSender,
         ui_tx: mpsc::Sender<UiEvent>,
+        registry: FileRegistry,
+        download_dir: PathBuf,
+        local_name: String,
+        local_host: String,
     ) -> Self {
         Self {
             local_id,
@@ -95,6 +173,10 @@ impl EventHandler {
             peer_manager,
             sender,
             ui_tx,
+            registry,
+            download_dir,
+            local_name,
+            local_host,
         }
     }
 
@@ -171,18 +253,44 @@ impl EventHandler {
         let msg_id = Uuid::new_v4().to_string();
         let peer_id = format!("{}:{}", from.ip(), from.port());
 
-        // Check if this message has file attachments.
+        // Check if this message has file attachments and parse them.
         let has_files = packet.has_flag(flags::IPMSG_FILEATTACHOPT);
-        let display_content = if has_files {
-            // Split text from file records at \0.
-            content.split('\0').next().unwrap_or("").to_string()
+        let (text_part, files) = if has_files {
+            // Format: "text\0record1\x07record2\x07..."
+            let (text, records) = match content.split_once('\0') {
+                Some((t, r)) => (t.to_string(), r),
+                None => (content.clone(), ""),
+            };
+            let parsed: Vec<IncomingFile> = records
+                .split('\x07')
+                .filter(|r| !r.is_empty())
+                .filter_map(|r| FileOffer::from_wire_record(r, Path::new(".")))
+                .map(|offer| IncomingFile {
+                    file_id: offer.file_id,
+                    filename: offer.filename,
+                    size: offer.size,
+                })
+                .collect();
+            (text, parsed)
         } else {
-            content.clone()
+            (content.clone(), Vec::new())
+        };
+
+        // Build the display/persisted content. If there's no accompanying text
+        // but there are files, show a "[文件]" placeholder with the filenames.
+        let display_content = if text_part.trim().is_empty() && !files.is_empty() {
+            let names: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+            format!("[文件] {}", names.join(", "))
+        } else {
+            text_part.clone()
         };
 
         info!(
-            "Message from {} ({}): {:?}",
-            packet.sender_name, from, &display_content[..display_content.len().min(50)]
+            "Message from {} ({}): {:?} ({} file(s))",
+            packet.sender_name,
+            from,
+            &display_content[..display_content.len().min(50)],
+            files.len()
         );
 
         // Persist to database.
@@ -205,17 +313,32 @@ impl EventHandler {
             }
         }
 
-        // Notify UI.
+        // Notify UI of the chat message.
+        let sender_name = packet.sender_name.clone();
         let _ = self
             .ui_tx
             .send(UiEvent::MessageReceived {
-                id: msg_id,
-                sender: packet.sender_name,
+                id: msg_id.clone(),
+                sender: sender_name.clone(),
                 sender_addr: from,
                 content: display_content,
                 timestamp,
+                packet_no: packet.packet_no,
             })
             .await;
+
+        // If files are attached, prompt the UI to accept/reject them.
+        if !files.is_empty() {
+            let _ = self
+                .ui_tx
+                .send(UiEvent::FileOfferReceived {
+                    from,
+                    name: sender_name,
+                    msg_id,
+                    files,
+                })
+                .await;
+        }
     }
 
     /// Handle a delivery receipt (RecvMsg) — confirms our message was received.
@@ -308,6 +431,7 @@ impl EventHandler {
                 sender_addr: from,
                 content,
                 timestamp,
+                packet_no: packet.packet_no,
             })
             .await;
     }
@@ -349,10 +473,236 @@ impl EventHandler {
                 recipient: peer_id,
                 content: content.to_string(),
                 timestamp,
+                packet_no,
             })
             .await;
 
         Ok((msg_id, packet_no))
+    }
+
+    /// Send read receipts (ReadMsg) for a batch of received packet numbers.
+    ///
+    /// Called when the user opens a conversation so the peer knows their
+    /// messages have been read. Each receipt carries the original sender's
+    /// packet number, per the IPMsg/FeiQ convention.
+    pub async fn send_read_receipts(&self, to: SocketAddr, packet_nos: &[u32]) {
+        for &no in packet_nos {
+            if let Err(e) = self.sender.send_read_receipt(to, no).await {
+                debug!("Failed to send read receipt to {} for {}: {}", to, no, e);
+            }
+        }
+    }
+
+    /// Send a screen-shake (knock) request to a peer.
+    pub async fn send_knock(&self, to: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.sender.send_knock(to).await?;
+        Ok(())
+    }
+
+    /// Load conversation history for `peer` from the database and emit it to
+    /// the UI as [`UiEvent::HistoryLoaded`].
+    ///
+    /// Messages are returned in chronological order (oldest first). `limit`
+    /// caps how many of the most recent messages are loaded.
+    pub async fn request_history(&self, peer: SocketAddr, limit: u32) {
+        let peer_str = format!("{}:{}", peer.ip(), peer.port());
+        let page = Page::new(limit, 0);
+        match self
+            .db
+            .get_messages_paged(&self.local_id, &peer_str, page)
+            .await
+        {
+            Ok(result) => {
+                let messages = result
+                    .items
+                    .into_iter()
+                    .map(|m| HistoryMsg {
+                        id: m.id,
+                        text: m.content,
+                        timestamp: m.timestamp,
+                        outgoing: m.sender == self.local_id,
+                    })
+                    .collect();
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::HistoryLoaded { peer, messages })
+                    .await;
+            }
+            Err(e) => warn!("Failed to load history for {}: {}", peer, e),
+        }
+    }
+
+    /// Send one or more local files to a peer.
+    ///
+    /// Each path is registered in the shared [`FileRegistry`] so the peer can
+    /// pull the bytes over TCP. A single SendMsg packet carries the optional
+    /// `text` plus all file records. Returns the assigned packet number.
+    pub async fn send_files(
+        &self,
+        to: SocketAddr,
+        text: &str,
+        paths: &[PathBuf],
+    ) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+        let mut records: Vec<String> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+
+        for path in paths {
+            match self.registry.register(path).await {
+                Ok(offer) => {
+                    names.push(offer.filename.clone());
+                    records.push(offer.to_wire_record());
+                }
+                Err(e) => {
+                    warn!("Failed to register file {:?}: {}", path, e);
+                }
+            }
+        }
+
+        if records.is_empty() {
+            return Err("no files could be registered".into());
+        }
+
+        // FeiQ joins multiple records with \x07 (the sender adds a trailing \x07).
+        let record_str = records.join("\x07");
+        let packet_no = self
+            .sender
+            .send_message_with_files(to, text, &record_str, true)
+            .await?;
+
+        // Persist a placeholder message so the send shows up in history.
+        let msg_id = Uuid::new_v4().to_string();
+        let timestamp = now_timestamp();
+        let peer_id = format!("{}:{}", to.ip(), to.port());
+        let display = if text.trim().is_empty() {
+            format!("[文件] {}", names.join(", "))
+        } else {
+            format!("{}\n[文件] {}", text, names.join(", "))
+        };
+
+        let stored = StoredMessage {
+            id: msg_id.clone(),
+            sender: self.local_id.clone(),
+            recipient: peer_id.clone(),
+            content: display.clone(),
+            timestamp,
+            read: true,
+        };
+        if let Err(e) = self.db.insert_message(&stored).await {
+            warn!("Failed to store sent file message: {}", e);
+        }
+
+        let _ = self
+            .ui_tx
+            .send(UiEvent::MessageSent {
+                id: msg_id,
+                recipient: peer_id,
+                content: display,
+                timestamp,
+                packet_no,
+            })
+            .await;
+
+        Ok(packet_no)
+    }
+
+    /// Accept an incoming file offer: download it from the peer to our
+    /// downloads directory, streaming progress to the UI.
+    ///
+    /// This runs the full download to completion (awaited). The caller is
+    /// expected to invoke it from a spawned task.
+    pub async fn accept_file(
+        &self,
+        from: SocketAddr,
+        file_id: u32,
+        filename: String,
+        size: u64,
+    ) {
+        let transfer_id = format!("{}:{}", from, file_id);
+
+        // Ensure the download directory exists.
+        if let Err(e) = std::fs::create_dir_all(&self.download_dir) {
+            let _ = self
+                .ui_tx
+                .send(UiEvent::FileFailed {
+                    transfer_id,
+                    filename,
+                    error: format!("无法创建下载目录: {}", e),
+                })
+                .await;
+            return;
+        }
+
+        // Avoid clobbering an existing file by prefixing with the file id.
+        let sanitized = filename
+            .replace(['/', '\\', ':'], "_");
+        let mut dest = self.download_dir.join(&sanitized);
+        if dest.exists() {
+            dest = self
+                .download_dir
+                .join(format!("{}_{}", file_id, sanitized));
+        }
+
+        // Throttled progress callback: only notify on each whole-percent change.
+        let ui_tx = self.ui_tx.clone();
+        let cb_id = transfer_id.clone();
+        let cb_name = filename.clone();
+        let last_pct = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let progress: ProgressCallback = Arc::new(move |received: u64, total: u64| {
+            let pct = if total == 0 { 100 } else { received * 100 / total };
+            let prev = last_pct.load(std::sync::atomic::Ordering::Relaxed);
+            if pct != prev {
+                last_pct.store(pct, std::sync::atomic::Ordering::Relaxed);
+                let _ = ui_tx.try_send(UiEvent::FileProgress {
+                    transfer_id: cb_id.clone(),
+                    filename: cb_name.clone(),
+                    received,
+                    total,
+                });
+            }
+        });
+
+        info!("Accepting file {} ({} bytes) from {}", filename, size, from);
+        match FileDownloader::download(
+            from,
+            file_id,
+            0,
+            size,
+            &dest,
+            &self.local_name,
+            &self.local_host,
+            Some(progress),
+        )
+        .await
+        {
+            Ok(_) => {
+                info!("File {} saved to {:?}", filename, dest);
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::FileComplete {
+                        transfer_id,
+                        filename,
+                        path: dest,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                warn!("Failed to download {} from {}: {}", filename, from, e);
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::FileFailed {
+                        transfer_id,
+                        filename,
+                        error: e.to_string(),
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// Reject an incoming file offer. No bytes are transferred. The UI removes
+    /// the prompt locally, so no event is emitted here.
+    pub async fn reject_file(&self, from: SocketAddr, file_id: u32, filename: String) {
+        info!("Rejected file {} (id={}) from {}", filename, file_id, from);
     }
 }
 

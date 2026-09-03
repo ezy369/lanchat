@@ -8,4 +8,4 @@ pub mod app_state;
 pub mod handlers;
 
 pub use app_state::AppState;
-pub use handlers::{run_event_loop, EventHandler, UiEvent};
+pub use handlers::{run_event_loop, EventHandler, HistoryMsg, IncomingFile, UiEvent};

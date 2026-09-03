@@ -5,9 +5,9 @@ use gpui::prelude::*;
 use gpui::{div, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{h_flex, v_flex};
+use gpui_component::{h_flex, v_flex, Sizable};
 
-use crate::app::{ChatMsg, Palette};
+use crate::app::{ChatMsg, MsgStatus, Palette};
 
 /// Render the chat panel.
 ///
@@ -21,6 +21,8 @@ pub fn render_chat_panel(
     input: &Entity<InputState>,
     palette: Palette,
     on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_knock: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_send_file: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let Some(name) = peer_name else {
         return empty_chat(palette);
@@ -40,6 +42,23 @@ pub fn render_chat_panel(
                 .font_weight(FontWeight::BOLD)
                 .text_color(palette.foreground)
                 .child(name.to_string()),
+        )
+        .child(div().flex_1())
+        .child(
+            h_flex()
+                .gap(px(8.0))
+                .child(
+                    Button::new("send-file-btn")
+                        .small()
+                        .label("发送文件")
+                        .on_click(on_send_file),
+                )
+                .child(
+                    Button::new("knock-btn")
+                        .small()
+                        .label("抖屏")
+                        .on_click(on_knock),
+                ),
         );
 
     // ── Message list ────────────────────────────────────────────────────
@@ -123,7 +142,13 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
 
     let time = format_time(msg.timestamp);
     let meta = if msg.outgoing {
-        format!("{} · You", time)
+        let mark = match msg.status {
+            MsgStatus::Sending => "…",
+            MsgStatus::Sent => "✓",
+            MsgStatus::Delivered => "✓",
+            MsgStatus::Read => "✓✓",
+        };
+        format!("{} · You · {}", time, mark)
     } else {
         format!("{} · {}", time, msg.sender_name)
     };

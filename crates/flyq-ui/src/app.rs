@@ -5,22 +5,41 @@
 //! and the chat input), consumes [`UiEvent`]s emitted by the core event loop,
 //! and dispatches outgoing messages through a shared [`EventHandler`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use flyq_core::{EventHandler, UiEvent};
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, AsyncApp, Context, Entity, Hsla, Window};
+use gpui::{
+    div, px, white, AnyElement, App, AsyncApp, Context, Entity, ExternalPaths, Hsla,
+    PathPromptOptions, Window,
+};
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{h_flex, ActiveTheme, Root};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable};
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::chat;
 use crate::sidebar;
 use crate::tokio_runtime::Tokio;
+
+/// Delivery/read state of an outgoing message.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MsgStatus {
+    /// Queued / being sent (not yet confirmed on the wire).
+    Sending,
+    /// Sent over UDP, no receipt yet.
+    Sent,
+    /// Peer confirmed delivery (RecvMsg).
+    Delivered,
+    /// Peer confirmed the message was read (ReadMsg).
+    Read,
+}
 
 /// A single chat message as rendered in the UI.
 #[derive(Clone, Debug)]
@@ -35,6 +54,54 @@ pub struct ChatMsg {
     pub outgoing: bool,
     /// Display name of the sender.
     pub sender_name: String,
+    /// IPMsg packet number, used to match receipts (received) or acknowledge
+    /// reads (incoming). `None` for messages loaded from history.
+    pub packet_no: Option<u32>,
+    /// Delivery/read state (meaningful for outgoing messages).
+    pub status: MsgStatus,
+}
+
+/// An incoming file offer awaiting the user's accept/reject decision.
+#[derive(Clone, Debug)]
+pub struct FileOfferPrompt {
+    /// Peer address the file was offered by.
+    pub from: SocketAddr,
+    /// Display name of the offering peer.
+    pub from_name: String,
+    /// Sender-assigned file id (needed to request the bytes over TCP).
+    pub file_id: u32,
+    /// Original filename.
+    pub filename: String,
+    /// Declared size in bytes.
+    pub size: u64,
+}
+
+/// Lifecycle stage of a tracked file transfer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TransferStage {
+    /// Currently downloading.
+    Downloading,
+    /// Completed and saved to disk.
+    Complete,
+    /// Failed (network error, etc.).
+    Failed,
+}
+
+/// A tracked file transfer (currently only incoming downloads).
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    /// Original filename.
+    pub filename: String,
+    /// Bytes received so far.
+    pub received: u64,
+    /// Total expected bytes.
+    pub total: u64,
+    /// Current lifecycle stage.
+    pub stage: TransferStage,
+    /// Saved path once complete.
+    pub path: Option<PathBuf>,
+    /// Error message once failed.
+    pub error: Option<String>,
 }
 
 /// Copyable snapshot of the theme colors used by the render helpers.
@@ -91,6 +158,18 @@ pub struct LanChatApp {
     typing: HashMap<SocketAddr, String>,
     /// Known display names keyed by address (survives a peer going offline).
     names: HashMap<SocketAddr, String>,
+    /// Packet numbers of incoming messages we've already acknowledged as read.
+    read_acked: HashSet<u32>,
+    /// Conversations whose history has already been requested from the DB.
+    history_loaded: HashSet<SocketAddr>,
+    /// When a screen-shake (knock) animation started, if active.
+    shake: Option<Instant>,
+    /// Transient banner text for an incoming knock, with its start time.
+    knock_banner: Option<(String, Instant)>,
+    /// Incoming file offers awaiting an accept/reject decision.
+    file_offers: Vec<FileOfferPrompt>,
+    /// Tracked file transfers keyed by transfer id.
+    transfers: HashMap<String, Transfer>,
     /// Chat message input state.
     input: Entity<InputState>,
     /// Shared handler used to send messages (persists + emits MessageSent).
@@ -140,6 +219,12 @@ impl LanChatApp {
             conversations: HashMap::new(),
             typing: HashMap::new(),
             names: HashMap::new(),
+            read_acked: HashSet::new(),
+            history_loaded: HashSet::new(),
+            shake: None,
+            knock_banner: None,
+            file_offers: Vec::new(),
+            transfers: HashMap::new(),
             input,
             handler,
             rt,
@@ -201,6 +286,7 @@ impl LanChatApp {
                 sender_addr,
                 content,
                 timestamp,
+                packet_no,
             } => {
                 self.names.insert(sender_addr, sender.clone());
                 self.typing.remove(&sender_addr);
@@ -210,13 +296,21 @@ impl LanChatApp {
                     timestamp,
                     outgoing: false,
                     sender_name: sender,
+                    packet_no: Some(packet_no),
+                    status: MsgStatus::Read,
                 });
+                // If this conversation is currently open, acknowledge the read
+                // immediately so the peer sees the "read" state.
+                if self.selected == Some(sender_addr) {
+                    self.acknowledge_reads(sender_addr);
+                }
             }
             UiEvent::MessageSent {
                 id,
                 recipient,
                 content,
                 timestamp,
+                packet_no,
             } => {
                 if let Ok(addr) = recipient.parse::<SocketAddr>() {
                     self.conversations.entry(addr).or_default().push(ChatMsg {
@@ -225,6 +319,8 @@ impl LanChatApp {
                         timestamp,
                         outgoing: true,
                         sender_name: self.local_name.clone(),
+                        packet_no: Some(packet_no),
+                        status: MsgStatus::Sent,
                     });
                 } else {
                     warn!("MessageSent recipient not a socket addr: {}", recipient);
@@ -236,12 +332,115 @@ impl LanChatApp {
             UiEvent::TypingEnd { from, .. } => {
                 self.typing.remove(&from);
             }
-            UiEvent::Knock { from, name } => {
-                // TODO(M4): trigger a screen-shake animation.
-                tracing::info!("Screen shake from {} ({})", name, from);
+            UiEvent::Knock { from: _, name } => {
+                // Trigger the screen-shake animation and a transient banner.
+                self.shake = Some(Instant::now());
+                self.knock_banner = Some((format!("{} 抖了抖你", name), Instant::now()));
             }
-            UiEvent::DeliveryConfirmed { .. } | UiEvent::ReadConfirmed { .. } => {
-                // TODO(M4): update per-message delivery/read status.
+            UiEvent::DeliveryConfirmed {
+                original_packet_no,
+                from,
+            } => {
+                self.set_outgoing_status(from, original_packet_no, MsgStatus::Delivered);
+            }
+            UiEvent::ReadConfirmed {
+                original_packet_no,
+                from,
+            } => {
+                self.set_outgoing_status(from, original_packet_no, MsgStatus::Read);
+            }
+            UiEvent::HistoryLoaded { peer, messages } => {
+                let name = self.peer_name(&peer);
+                let local_name = self.local_name.clone();
+                let entry = self.conversations.entry(peer).or_default();
+                for h in messages {
+                    if entry.iter().any(|m| m.id == h.id) {
+                        continue; // Already present (e.g. a live message).
+                    }
+                    entry.push(ChatMsg {
+                        id: h.id,
+                        text: h.text,
+                        timestamp: h.timestamp,
+                        outgoing: h.outgoing,
+                        sender_name: if h.outgoing {
+                            local_name.clone()
+                        } else {
+                            name.clone()
+                        },
+                        packet_no: None,
+                        status: MsgStatus::Read,
+                    });
+                }
+                // Stable sort keeps same-second messages in insertion order.
+                entry.sort_by_key(|m| m.timestamp);
+            }
+            UiEvent::FileOfferReceived {
+                from,
+                name,
+                msg_id: _,
+                files,
+            } => {
+                for f in files {
+                    self.file_offers.push(FileOfferPrompt {
+                        from,
+                        from_name: name.clone(),
+                        file_id: f.file_id,
+                        filename: f.filename,
+                        size: f.size,
+                    });
+                }
+            }
+            UiEvent::FileProgress {
+                transfer_id,
+                filename,
+                received,
+                total,
+            } => {
+                let t = self.transfers.entry(transfer_id).or_insert(Transfer {
+                    filename,
+                    received,
+                    total,
+                    stage: TransferStage::Downloading,
+                    path: None,
+                    error: None,
+                });
+                t.received = received;
+                t.total = total;
+                t.stage = TransferStage::Downloading;
+            }
+            UiEvent::FileComplete {
+                transfer_id,
+                filename,
+                path,
+            } => {
+                let t = self.transfers.entry(transfer_id).or_insert(Transfer {
+                    filename,
+                    received: 0,
+                    total: 0,
+                    stage: TransferStage::Complete,
+                    path: Some(path.clone()),
+                    error: None,
+                });
+                t.stage = TransferStage::Complete;
+                t.path = Some(path);
+                t.received = t.total;
+                t.error = None;
+            }
+            UiEvent::FileFailed {
+                transfer_id,
+                filename,
+                error,
+            } => {
+                let t = self.transfers.entry(transfer_id).or_insert(Transfer {
+                    filename,
+                    received: 0,
+                    total: 0,
+                    stage: TransferStage::Failed,
+                    path: None,
+                    error: Some(error.clone()),
+                });
+                t.stage = TransferStage::Failed;
+                t.error = Some(error);
             }
         }
         cx.notify();
@@ -257,7 +456,67 @@ impl LanChatApp {
     pub fn select_peer(&mut self, addr: SocketAddr, cx: &mut Context<Self>) {
         if self.selected != Some(addr) {
             self.selected = Some(addr);
-            cx.notify();
+        }
+        // Lazily load persisted history the first time a conversation is opened.
+        self.ensure_history(addr);
+        // Opening a conversation acknowledges any unread incoming messages.
+        self.acknowledge_reads(addr);
+        cx.notify();
+    }
+
+    /// Request conversation history from the database if not already loaded.
+    ///
+    /// Results arrive asynchronously via [`UiEvent::HistoryLoaded`].
+    fn ensure_history(&mut self, addr: SocketAddr) {
+        if self.history_loaded.contains(&addr) {
+            return;
+        }
+        self.history_loaded.insert(addr);
+        let handler = self.handler.clone();
+        self.rt.spawn(async move {
+            handler.request_history(addr, 100).await;
+        });
+    }
+
+    /// Send read receipts for all not-yet-acknowledged incoming messages from
+    /// `addr`, recording them so we don't acknowledge twice.
+    fn acknowledge_reads(&mut self, addr: SocketAddr) {
+        let mut pending: Vec<u32> = Vec::new();
+        if let Some(msgs) = self.conversations.get(&addr) {
+            for m in msgs {
+                if !m.outgoing {
+                    if let Some(no) = m.packet_no {
+                        if !self.read_acked.contains(&no) {
+                            pending.push(no);
+                        }
+                    }
+                }
+            }
+        }
+        if pending.is_empty() {
+            return;
+        }
+        for &no in &pending {
+            self.read_acked.insert(no);
+        }
+        let handler = self.handler.clone();
+        self.rt.spawn(async move {
+            handler.send_read_receipts(addr, &pending).await;
+        });
+    }
+
+    /// Upgrade the delivery/read status of an outgoing message matched by its
+    /// packet number. Statuses only ever advance (Read is never downgraded).
+    fn set_outgoing_status(&mut self, from: SocketAddr, packet_no: u32, status: MsgStatus) {
+        if let Some(msgs) = self.conversations.get_mut(&from) {
+            for m in msgs.iter_mut() {
+                if m.outgoing && m.packet_no == Some(packet_no) {
+                    if status_rank(status) > status_rank(m.status) {
+                        m.status = status;
+                    }
+                    break;
+                }
+            }
         }
     }
 
@@ -296,6 +555,43 @@ impl LanChatApp {
             }
         });
     }
+
+    /// Accept a pending incoming file offer: remove the prompt and start the
+    /// download on the Tokio runtime.
+    fn accept_offer(&mut self, offer: &FileOfferPrompt, cx: &mut Context<Self>) {
+        self.file_offers
+            .retain(|o| !(o.from == offer.from && o.file_id == offer.file_id));
+        let handler = self.handler.clone();
+        let from = offer.from;
+        let file_id = offer.file_id;
+        let filename = offer.filename.clone();
+        let size = offer.size;
+        self.rt.spawn(async move {
+            handler.accept_file(from, file_id, filename, size).await;
+        });
+        cx.notify();
+    }
+
+    /// Reject a pending incoming file offer: remove the prompt and notify the
+    /// core (no bytes are transferred).
+    fn reject_offer(&mut self, offer: &FileOfferPrompt, cx: &mut Context<Self>) {
+        self.file_offers
+            .retain(|o| !(o.from == offer.from && o.file_id == offer.file_id));
+        let handler = self.handler.clone();
+        let from = offer.from;
+        let file_id = offer.file_id;
+        let filename = offer.filename.clone();
+        self.rt.spawn(async move {
+            handler.reject_file(from, file_id, filename).await;
+        });
+        cx.notify();
+    }
+
+    /// Remove a finished (or failed) transfer card from the panel.
+    fn dismiss_transfer(&mut self, transfer_id: &str, cx: &mut Context<Self>) {
+        self.transfers.remove(transfer_id);
+        cx.notify();
+    }
 }
 
 impl Render for LanChatApp {
@@ -308,6 +604,35 @@ impl Render for LanChatApp {
         let selected = self.selected;
         let local_name = self.local_name.clone();
         let peer_count = self.peers.len();
+
+        // ── Screen-shake (knock) animation ───────────────────────────────
+        // A decaying sinusoidal offset applied to the content layer for ~0.5s.
+        let mut shake_dx = 0.0f32;
+        let mut shake_dy = 0.0f32;
+        if let Some(start) = self.shake {
+            const DURATION: f32 = 0.5;
+            let t = start.elapsed().as_secs_f32();
+            if t >= DURATION {
+                self.shake = None;
+            } else {
+                let decay = 1.0 - t / DURATION;
+                let amp = 14.0 * decay;
+                shake_dx = (t * 55.0).sin() * amp;
+                shake_dy = (t * 71.0).sin() * amp * 0.5;
+                window.request_animation_frame();
+            }
+        }
+
+        // ── Transient knock banner ───────────────────────────────────────
+        let mut banner: Option<String> = None;
+        if let Some((text, start)) = self.knock_banner.clone() {
+            if start.elapsed().as_secs_f32() >= 3.0 {
+                self.knock_banner = None;
+            } else {
+                banner = Some(text);
+                window.request_animation_frame();
+            }
+        }
 
         // ── Sidebar peer rows ────────────────────────────────────────────
         let mut rows: Vec<AnyElement> = Vec::with_capacity(self.peers.len());
@@ -341,6 +666,10 @@ impl Render for LanChatApp {
                 let send_input = input_entity.clone();
                 let send_handler = handler.clone();
                 let send_rt = rt.clone();
+                let knock_handler = handler.clone();
+                let knock_rt = rt.clone();
+                let file_handler = handler.clone();
+                let file_rt = rt.clone();
                 chat::render_chat_panel(
                     Some(&name),
                     &messages,
@@ -363,29 +692,326 @@ impl Render for LanChatApp {
                         // Keep a reference to the entity alive for future use.
                         let _ = &send_this;
                     },
+                    move |_, _, _| {
+                        let handler = knock_handler.clone();
+                        knock_rt.spawn(async move {
+                            if let Err(e) = handler.send_knock(addr).await {
+                                warn!("Failed to send knock to {}: {}", addr, e);
+                            }
+                        });
+                    },
+                    move |_, _, cx| {
+                        // Native multi-file picker (runs on the platform thread).
+                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: true,
+                            prompt: None,
+                        });
+                        let handler = file_handler.clone();
+                        file_rt.spawn(async move {
+                            match rx.await {
+                                Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                    if let Err(e) = handler.send_files(addr, "", &paths).await {
+                                        warn!("Failed to send files to {}: {}", addr, e);
+                                    }
+                                }
+                                Ok(Err(e)) => warn!("File picker error: {}", e),
+                                _ => {}
+                            }
+                        });
+                    },
                 )
             }
-            None => chat::render_chat_panel(None, &[], None, &self.input, palette, |_, _, _| {}),
+            None => chat::render_chat_panel(
+                None,
+                &[],
+                None,
+                &self.input,
+                palette,
+                |_, _, _| {},
+                |_, _, _| {},
+                |_, _, _| {},
+            ),
         };
 
-        div()
+        let drop_handler = handler.clone();
+        let drop_rt = rt.clone();
+        let drop_selected = selected;
+
+        let content = h_flex()
             .size_full()
+            .child(
+                div()
+                    .w(px(248.0))
+                    .h_full()
+                    .bg(palette.sidebar)
+                    .border_r_1()
+                    .border_color(palette.border)
+                    .child(sidebar_el),
+            )
+            .child(
+                div()
+                    .id("chat-drop")
+                    .flex_1()
+                    .h_full()
+                    .drag_over::<ExternalPaths>(move |style, _paths, _window, _cx| {
+                        style.bg(palette.muted).border_color(palette.primary)
+                    })
+                    .on_drop::<ExternalPaths>(move |paths, _window, _cx| {
+                        if let Some(to) = drop_selected {
+                            let files: Vec<PathBuf> = paths.paths().to_vec();
+                            if !files.is_empty() {
+                                let handler = drop_handler.clone();
+                                drop_rt.spawn(async move {
+                                    if let Err(e) = handler.send_files(to, "", &files).await {
+                                        warn!("Failed to send dropped files to {}: {}", to, e);
+                                    }
+                                });
+                            }
+                        }
+                    })
+                    .child(chat_el),
+            );
+
+        let mut root = div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
             .bg(palette.background)
             .child(
-                h_flex()
+                div()
+                    .absolute()
+                    .top(px(shake_dy))
+                    .left(px(shake_dx))
                     .size_full()
+                    .child(content),
+            );
+
+        if let Some(text) = banner {
+            root = root.child(
+                div().absolute().top(px(18.0)).w_full().child(
+                    h_flex().w_full().justify_center().child(
+                        div()
+                            .px(px(16.0))
+                            .py(px(7.0))
+                            .rounded(px(16.0))
+                            .bg(palette.primary)
+                            .text_color(white())
+                            .text_sm()
+                            .child(text),
+                    ),
+                ),
+            );
+        }
+
+        // ── Transfer panel (pending offers + progress/completion) ─────────
+        let mut transfer_cards: Vec<AnyElement> = Vec::new();
+        for offer in self.file_offers.clone() {
+            let accept_this = this.clone();
+            let accept_offer = offer.clone();
+            let reject_this = this.clone();
+            let reject_offer = offer.clone();
+            let accept_id = format!("accept-{}-{}", offer.from, offer.file_id);
+            let reject_id = format!("reject-{}-{}", offer.from, offer.file_id);
+            let card = div()
+                .w_full()
+                .p(px(12.0))
+                .rounded(px(10.0))
+                .bg(palette.sidebar)
+                .border_1()
+                .border_color(palette.primary)
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(6.0))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap(px(6.0))
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .overflow_x_hidden()
+                                        .text_sm()
+                                        .text_color(palette.foreground)
+                                        .child(offer.filename.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(palette.muted_foreground)
+                                        .child(format_size(offer.size)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.muted_foreground)
+                                .child(format!("{} 想发送文件给你", offer.from_name)),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new(reject_id)
+                                        .xsmall()
+                                        .label("拒绝")
+                                        .on_click(move |_, _, cx| {
+                                            reject_this.update(cx, |app, cx| {
+                                                app.reject_offer(&reject_offer, cx)
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new(accept_id)
+                                        .primary()
+                                        .xsmall()
+                                        .label("接收")
+                                        .on_click(move |_, _, cx| {
+                                            accept_this.update(cx, |app, cx| {
+                                                app.accept_offer(&accept_offer, cx)
+                                            });
+                                        }),
+                                ),
+                        ),
+                );
+            transfer_cards.push(card.into_any_element());
+        }
+
+        for (tid, t) in self.transfers.clone() {
+            let dismiss_this = this.clone();
+            let dismiss_id = tid.clone();
+            let mut body = v_flex().w_full().gap(px(6.0)).child(
+                h_flex()
+                    .w_full()
+                    .gap(px(6.0))
+                    .items_center()
                     .child(
                         div()
-                            .w(px(248.0))
-                            .h_full()
-                            .bg(palette.sidebar)
-                            .border_r_1()
-                            .border_color(palette.border)
-                            .child(sidebar_el),
-                    )
-                    .child(div().flex_1().h_full().child(chat_el)),
-            )
-            .children(Root::render_dialog_layer(window, cx))
+                            .flex_1()
+                            .overflow_x_hidden()
+                            .text_sm()
+                            .text_color(palette.foreground)
+                            .child(t.filename.clone()),
+                    ),
+            );
+
+            match t.stage {
+                TransferStage::Downloading => {
+                    let pct = if t.total > 0 {
+                        (t.received as f32 / t.total as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    body = body
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(6.0))
+                                .rounded(px(3.0))
+                                .bg(palette.muted)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded(px(3.0))
+                                        .bg(palette.primary)
+                                        .w(px(236.0 * pct)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.muted_foreground)
+                                .child(format!(
+                                    "{} / {}",
+                                    format_size(t.received),
+                                    format_size(t.total)
+                                )),
+                        );
+                }
+                TransferStage::Complete => {
+                    let reveal_path = t.path.clone();
+                    body = body
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.success)
+                                .child("已保存"),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new(format!("dismiss-{}", tid))
+                                        .xsmall()
+                                        .label("×")
+                                        .on_click(move |_, _, cx| {
+                                            dismiss_this.update(cx, |app, cx| {
+                                                app.dismiss_transfer(&dismiss_id, cx)
+                                            });
+                                        }),
+                                )
+                                .children(reveal_path.map(|p| {
+                                    Button::new(format!("open-{}", tid))
+                                        .xsmall()
+                                        .label("打开文件夹")
+                                        .on_click(move |_, _, cx| cx.reveal_path(&p))
+                                        .into_any_element()
+                                })),
+                        );
+                }
+                TransferStage::Failed => {
+                    body = body
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.danger)
+                                .child(t.error.clone().unwrap_or_else(|| "传输失败".to_string())),
+                        )
+                        .child(
+                            h_flex().w_full().justify_end().child(
+                                Button::new(format!("dismiss-{}", tid))
+                                    .xsmall()
+                                    .label("×")
+                                    .on_click(move |_, _, cx| {
+                                        dismiss_this.update(cx, |app, cx| {
+                                            app.dismiss_transfer(&dismiss_id, cx)
+                                        });
+                                    }),
+                            ),
+                        );
+                }
+            }
+
+            let card = div()
+                .w_full()
+                .p(px(12.0))
+                .rounded(px(10.0))
+                .bg(palette.sidebar)
+                .border_1()
+                .border_color(palette.border)
+                .child(body);
+            transfer_cards.push(card.into_any_element());
+        }
+
+        if !transfer_cards.is_empty() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .bottom(px(16.0))
+                    .right(px(16.0))
+                    .w(px(280.0))
+                    .child(v_flex().w_full().gap(px(8.0)).children(transfer_cards)),
+            );
+        }
+
+        root.children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
 }
@@ -400,5 +1026,31 @@ pub fn status_color(status: UserStatus, online: bool, palette: Palette) -> Hsla 
         UserStatus::Away => palette.warning,
         UserStatus::Busy => palette.danger,
         UserStatus::Offline => palette.muted_foreground,
+    }
+}
+
+/// Ordering rank for [`MsgStatus`], so statuses only ever advance.
+fn status_rank(status: MsgStatus) -> u8 {
+    match status {
+        MsgStatus::Sending => 0,
+        MsgStatus::Sent => 1,
+        MsgStatus::Delivered => 2,
+        MsgStatus::Read => 3,
+    }
+}
+
+/// Format a byte count as a human-readable size (e.g. `1.5 MB`).
+fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
     }
 }
