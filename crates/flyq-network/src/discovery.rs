@@ -174,6 +174,24 @@ impl DiscoveryService {
         }
     }
 
+    /// Create a `MessageSender` handle that shares this service's UDP socket.
+    ///
+    /// The sender can be cloned and used from any Tokio task to send messages,
+    /// receipts, typing indicators, and other unicast packets.
+    pub fn message_sender(&self) -> super::message::MessageSender {
+        super::message::MessageSender::new(
+            Arc::clone(&self.socket),
+            super::message::SenderIdentity {
+                username: self.config.username.clone(),
+                hostname: self.config.hostname.clone(),
+                mac_address: self.config.mac_address.clone(),
+                feiq_level: self.config.feiq_level,
+                use_feiq_version: self.config.use_feiq_version,
+            },
+            Arc::clone(&self.packet_no),
+        )
+    }
+
     /// Build a packet with our identity and the given command.
     fn build_packet(&self, cmd: Command, extra: Option<&str>) -> String {
         let no = self.packet_no.fetch_add(1, Ordering::Relaxed);
