@@ -1969,6 +1969,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flyq-protocol",
+ "hostname",
  "if-addrs",
  "serde",
  "thiserror 2.0.20",

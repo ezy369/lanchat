@@ -16,3 +16,4 @@ anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 if-addrs.workspace = true
+hostname.workspace = true
