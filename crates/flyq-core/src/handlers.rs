@@ -40,6 +40,8 @@ pub struct IncomingFile {
     pub filename: String,
     /// Declared size in bytes.
     pub size: u64,
+    /// True when this offer is a directory (recursive folder transfer).
+    pub is_dir: bool,
 }
 
 /// Events emitted to the UI layer for rendering updates.
@@ -269,6 +271,7 @@ impl EventHandler {
                     file_id: offer.file_id,
                     filename: offer.filename,
                     size: offer.size,
+                    is_dir: offer.file_type == 2,
                 })
                 .collect();
             (text, parsed)
@@ -279,7 +282,16 @@ impl EventHandler {
         // Build the display/persisted content. If there's no accompanying text
         // but there are files, show a "[文件]" placeholder with the filenames.
         let display_content = if text_part.trim().is_empty() && !files.is_empty() {
-            let names: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+            let names: Vec<String> = files
+                .iter()
+                .map(|f| {
+                    if f.is_dir {
+                        format!("{}/", f.filename)
+                    } else {
+                        f.filename.clone()
+                    }
+                })
+                .collect();
             format!("[文件] {}", names.join(", "))
         } else {
             text_part.clone()
@@ -549,7 +561,12 @@ impl EventHandler {
         for path in paths {
             match self.registry.register(path).await {
                 Ok(offer) => {
-                    names.push(offer.filename.clone());
+                    let display_name = if offer.file_type == 2 {
+                        format!("{}/", offer.filename)
+                    } else {
+                        offer.filename.clone()
+                    };
+                    names.push(display_name);
                     records.push(offer.to_wire_record());
                 }
                 Err(e) => {
@@ -616,7 +633,13 @@ impl EventHandler {
         file_id: u32,
         filename: String,
         size: u64,
+        is_dir: bool,
     ) {
+        if is_dir {
+            self.accept_dir(from, file_id, filename).await;
+            return;
+        }
+
         let transfer_id = format!("{}:{}", from, file_id);
 
         // Ensure the download directory exists.
@@ -692,6 +715,95 @@ impl EventHandler {
                     .send(UiEvent::FileFailed {
                         transfer_id,
                         filename,
+                        error: e.to_string(),
+                    })
+                    .await;
+            }
+        }
+    }
+
+    /// Accept an incoming directory (folder) offer: fetch its recursive listing
+    /// and download the whole tree under our downloads directory, streaming
+    /// aggregated progress to the UI.
+    async fn accept_dir(&self, from: SocketAddr, dir_file_id: u32, folder_name: String) {
+        let transfer_id = format!("{}:{}", from, dir_file_id);
+
+        // Ensure the download directory exists.
+        if let Err(e) = std::fs::create_dir_all(&self.download_dir) {
+            let _ = self
+                .ui_tx
+                .send(UiEvent::FileFailed {
+                    transfer_id,
+                    filename: folder_name,
+                    error: format!("无法创建下载目录: {}", e),
+                })
+                .await;
+            return;
+        }
+
+        // Avoid clobbering an existing folder by prefixing with the file id.
+        let sanitized = folder_name.replace(['/', '\\', ':'], "_");
+        let mut dest_base = self.download_dir.join(&sanitized);
+        if dest_base.exists() {
+            dest_base = self
+                .download_dir
+                .join(format!("{}_{}", dir_file_id, sanitized));
+        }
+
+        // Throttled aggregated progress: only notify on each whole-percent change.
+        let ui_tx = self.ui_tx.clone();
+        let cb_id = transfer_id.clone();
+        let cb_name = folder_name.clone();
+        let last_pct = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let progress: ProgressCallback = Arc::new(move |received: u64, total: u64| {
+            let pct = if total == 0 { 100 } else { received * 100 / total };
+            let prev = last_pct.load(std::sync::atomic::Ordering::Relaxed);
+            if pct != prev {
+                last_pct.store(pct, std::sync::atomic::Ordering::Relaxed);
+                let _ = ui_tx.try_send(UiEvent::FileProgress {
+                    transfer_id: cb_id.clone(),
+                    filename: cb_name.clone(),
+                    received,
+                    total,
+                });
+            }
+        });
+
+        info!("Accepting folder {} from {}", folder_name, from);
+        match FileDownloader::download_dir(
+            from,
+            dir_file_id,
+            &dest_base,
+            &self.local_name,
+            &self.local_host,
+            Some(progress),
+        )
+        .await
+        {
+            Ok(summary) => {
+                info!(
+                    "Folder {} saved to {:?} ({} files, {} dirs, {} bytes)",
+                    folder_name, dest_base, summary.files, summary.dirs, summary.bytes
+                );
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::FileComplete {
+                        transfer_id,
+                        filename: folder_name,
+                        path: dest_base,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to download folder {} from {}: {}",
+                    folder_name, from, e
+                );
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::FileFailed {
+                        transfer_id,
+                        filename: folder_name,
                         error: e.to_string(),
                     })
                     .await;

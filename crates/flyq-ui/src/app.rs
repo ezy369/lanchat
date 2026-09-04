@@ -74,6 +74,8 @@ pub struct FileOfferPrompt {
     pub filename: String,
     /// Declared size in bytes.
     pub size: u64,
+    /// True when the offer is a directory (recursive folder transfer).
+    pub is_dir: bool,
 }
 
 /// Lifecycle stage of a tracked file transfer.
@@ -387,6 +389,7 @@ impl LanChatApp {
                         file_id: f.file_id,
                         filename: f.filename,
                         size: f.size,
+                        is_dir: f.is_dir,
                     });
                 }
             }
@@ -566,8 +569,9 @@ impl LanChatApp {
         let file_id = offer.file_id;
         let filename = offer.filename.clone();
         let size = offer.size;
+        let is_dir = offer.is_dir;
         self.rt.spawn(async move {
-            handler.accept_file(from, file_id, filename, size).await;
+            handler.accept_file(from, file_id, filename, size, is_dir).await;
         });
         cx.notify();
     }
@@ -836,7 +840,11 @@ impl Render for LanChatApp {
                                         .overflow_x_hidden()
                                         .text_sm()
                                         .text_color(palette.foreground)
-                                        .child(offer.filename.clone()),
+                                        .child(if offer.is_dir {
+                                            format!("📁 {}/", offer.filename)
+                                        } else {
+                                            offer.filename.clone()
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -849,7 +857,11 @@ impl Render for LanChatApp {
                             div()
                                 .text_xs()
                                 .text_color(palette.muted_foreground)
-                                .child(format!("{} 想发送文件给你", offer.from_name)),
+                                .child(format!(
+                                    "{} 想发送{}给你",
+                                    offer.from_name,
+                                    if offer.is_dir { "文件夹" } else { "文件" }
+                                )),
                         )
                         .child(
                             h_flex()

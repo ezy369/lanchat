@@ -17,5 +17,6 @@ pub use discovery::{
 pub use message::{MessageError, MessageSender, SenderIdentity};
 pub use peer::PeerManager;
 pub use transport::{
-    FileDownloader, FileOffer, FileRegistry, ProgressCallback, Transport, TransportError,
+    safe_relative_join, DirDownloadSummary, FileDownloader, FileOffer, FileRegistry,
+    ProgressCallback, Transport, TransportError,
 };
