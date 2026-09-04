@@ -674,6 +674,8 @@ impl Render for LanChatApp {
                 let knock_rt = rt.clone();
                 let file_handler = handler.clone();
                 let file_rt = rt.clone();
+                let folder_handler = handler.clone();
+                let folder_rt = rt.clone();
                 chat::render_chat_panel(
                     Some(&name),
                     &messages,
@@ -725,6 +727,27 @@ impl Render for LanChatApp {
                             }
                         });
                     },
+                    move |_, _, cx| {
+                        // Native directory picker (folder transfer).
+                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: false,
+                            directories: true,
+                            multiple: true,
+                            prompt: None,
+                        });
+                        let handler = folder_handler.clone();
+                        folder_rt.spawn(async move {
+                            match rx.await {
+                                Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                    if let Err(e) = handler.send_files(addr, "", &paths).await {
+                                        warn!("Failed to send folder to {}: {}", addr, e);
+                                    }
+                                }
+                                Ok(Err(e)) => warn!("Folder picker error: {}", e),
+                                _ => {}
+                            }
+                        });
+                    },
                 )
             }
             None => chat::render_chat_panel(
@@ -733,6 +756,7 @@ impl Render for LanChatApp {
                 None,
                 &self.input,
                 palette,
+                |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},
