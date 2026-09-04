@@ -15,6 +15,12 @@ use gpui_component::Root;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
+// The system tray is only wired on Windows and macOS, mirroring the
+// target-gated `tray-icon` dependency in Cargo.toml (the Linux backend pulls
+// GTK/libappindicator system libraries that GPUI apps don't otherwise need).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod tray;
+
 /// Relative path of the embedded libSQL database.
 const DB_PATH: &str = "lanchat.db";
 
@@ -131,26 +137,35 @@ fn main() {
             let (ui_rx, handler, local_name, app_config) = rt.block_on(bootstrap());
 
             cx.spawn(async move |cx| {
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(Bounds {
-                            origin: gpui::Point::default(),
-                            size: size(px(1024.0), px(680.0)),
-                        })),
-                        titlebar: Some(gpui::TitlebarOptions {
-                            title: Some("LanChat".into()),
+                let window = cx
+                    .open_window(
+                        WindowOptions {
+                            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                                origin: gpui::Point::default(),
+                                size: size(px(1024.0), px(680.0)),
+                            })),
+                            titlebar: Some(gpui::TitlebarOptions {
+                                title: Some("LanChat".into()),
+                                ..Default::default()
+                            }),
                             ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    move |window, cx| {
-                        let view = cx.new(|cx| {
-                            LanChatApp::new(window, cx, local_name, app_config, handler, ui_rx)
-                        });
-                        cx.new(|cx| Root::new(view, window, cx))
-                    },
-                )
-                .expect("Failed to open main window");
+                        },
+                        move |window, cx| {
+                            let view = cx.new(|cx| {
+                                LanChatApp::new(window, cx, local_name, app_config, handler, ui_rx)
+                            });
+                            cx.new(|cx| Root::new(view, window, cx))
+                        },
+                    )
+                    .expect("Failed to open main window");
+
+                // Add the system tray icon on platforms that support it. This
+                // runs on the foreground (main) thread, which tray-icon requires
+                // for both creation and message pumping.
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tray::run_tray(cx, window);
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                let _ = window;
             })
             .detach();
         });
