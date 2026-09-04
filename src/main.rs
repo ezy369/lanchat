@@ -2,10 +2,9 @@
 //!
 //! A high-quality open source alternative to FeiQ/IP Messenger.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use flyq_core::{run_event_loop, EventHandler, UiEvent};
+use flyq_core::{run_event_loop, AppConfig, EventHandler, UiEvent};
 use flyq_network::{DiscoveryConfig, DiscoveryService, FileRegistry, PeerManager, Transport};
 use flyq_storage::Database;
 use flyq_ui::tokio_runtime;
@@ -21,10 +20,14 @@ const DB_PATH: &str = "lanchat.db";
 
 /// Bootstrap the storage + network stack on the Tokio runtime.
 ///
-/// Returns the UI event receiver, the shared event handler, and our display
-/// name. The discovery loop and the core event loop are spawned as detached
-/// Tokio tasks that live for the whole application lifetime.
-async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String) {
+/// Returns the UI event receiver, the shared event handler, our display name,
+/// and the loaded configuration (so the UI can prefill the settings panel). The
+/// discovery loop and the core event loop are spawned as detached Tokio tasks
+/// that live for the whole application lifetime.
+async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String, AppConfig) {
+    // Load persisted user settings (nickname / download dir / port).
+    let app_config = AppConfig::load();
+
     // Storage.
     let db = Database::open(DB_PATH)
         .await
@@ -34,9 +37,14 @@ async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String) {
     // Peer tracking (shared between discovery and the event handler).
     let peer_manager = PeerManager::new();
 
-    // Discovery configuration: use the machine hostname as our display name.
+    // Discovery configuration: apply the persisted nickname and port. The
+    // hostname always comes from the machine; the nickname defaults to it and
+    // only overrides when the user set a non-blank value.
     let mut config = DiscoveryConfig::default();
-    config.username = config.hostname.clone();
+    if !app_config.nickname.trim().is_empty() {
+        config.username = app_config.nickname.clone();
+    }
+    config.port = app_config.port;
     let local_name = config.username.clone();
     let local_host = config.hostname.clone();
     let port = config.port;
@@ -68,8 +76,8 @@ async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String) {
         }
     }
 
-    // Download directory for incoming files.
-    let download_dir = download_dir();
+    // Download directory for incoming files (from config).
+    let download_dir = app_config.download_dir.clone();
     if let Err(e) = std::fs::create_dir_all(&download_dir) {
         tracing::warn!("Failed to create download dir {:?}: {}", download_dir, e);
     }
@@ -91,24 +99,12 @@ async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String) {
     // Core event loop (network events -> storage + UI events).
     tokio::spawn(run_event_loop(Arc::clone(&handler), event_rx));
 
-    tracing::info!("Bootstrap complete; display name = {}", local_name);
-    (ui_rx, handler, local_name)
-}
-
-/// Resolve the directory where incoming files are saved.
-///
-/// Uses `<home>/Downloads/LanChat`, falling back to `./downloads` when the
-/// home directory can't be determined.
-fn download_dir() -> PathBuf {
-    let home = if cfg!(windows) {
-        std::env::var("USERPROFILE").ok()
-    } else {
-        std::env::var("HOME").ok()
-    };
-    match home {
-        Some(h) => PathBuf::from(h).join("Downloads").join("LanChat"),
-        None => PathBuf::from("downloads"),
-    }
+    tracing::info!(
+        "Bootstrap complete; display name = {}, port = {}",
+        local_name,
+        port
+    );
+    (ui_rx, handler, local_name, app_config)
 }
 
 fn main() {
@@ -131,7 +127,7 @@ fn main() {
 
             // Build the network + storage stack before opening the window.
             let rt = tokio_runtime::Tokio::handle(cx);
-            let (ui_rx, handler, local_name) = rt.block_on(bootstrap());
+            let (ui_rx, handler, local_name, app_config) = rt.block_on(bootstrap());
 
             cx.spawn(async move |cx| {
                 cx.open_window(
@@ -148,7 +144,7 @@ fn main() {
                     },
                     move |window, cx| {
                         let view = cx.new(|cx| {
-                            LanChatApp::new(window, cx, local_name, handler, ui_rx)
+                            LanChatApp::new(window, cx, local_name, app_config, handler, ui_rx)
                         });
                         cx.new(|cx| Root::new(view, window, cx))
                     },

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use flyq_core::{EventHandler, UiEvent};
+use flyq_core::{AppConfig, EventHandler, UiEvent};
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
 use gpui::{
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::chat;
+use crate::settings;
 use crate::sidebar;
 use crate::tokio_runtime::Tokio;
 
@@ -178,18 +179,31 @@ pub struct LanChatApp {
     handler: Arc<EventHandler>,
     /// Tokio runtime handle for spawning send tasks from click handlers.
     rt: tokio::runtime::Handle,
+    /// Current application configuration (nickname / download dir / port).
+    config: AppConfig,
+    /// Whether the settings modal is visible.
+    settings_open: bool,
+    /// Settings form: display nickname field.
+    settings_nickname: Entity<InputState>,
+    /// Settings form: download directory field.
+    settings_download: Entity<InputState>,
+    /// Settings form: network port field.
+    settings_port: Entity<InputState>,
 }
 
 impl LanChatApp {
     /// Create a new application view.
     ///
     /// * `local_name` — our display name.
+    /// * `config` — the loaded application configuration (nickname / download
+    ///   dir / port), used to prefill the settings panel.
     /// * `handler` — shared event handler for sending messages.
     /// * `ui_rx` — channel carrying [`UiEvent`]s from the core event loop.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
         local_name: String,
+        config: AppConfig,
         handler: Arc<EventHandler>,
         mut ui_rx: mpsc::Receiver<UiEvent>,
     ) -> Self {
@@ -197,6 +211,20 @@ impl LanChatApp {
 
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Type a message, press Enter to send…")
+        });
+
+        // Settings form fields, prefilled from the loaded config.
+        let settings_nickname = cx.new(|cx| InputState::new(window, cx).placeholder("昵称"));
+        settings_nickname.update(cx, |i, cx| {
+            i.set_value(&config.nickname, window, cx);
+        });
+        let settings_download = cx.new(|cx| InputState::new(window, cx).placeholder("下载目录"));
+        settings_download.update(cx, |i, cx| {
+            i.set_value(config.download_dir.to_string_lossy().as_ref(), window, cx);
+        });
+        let settings_port = cx.new(|cx| InputState::new(window, cx).placeholder("端口"));
+        settings_port.update(cx, |i, cx| {
+            i.set_value(config.port.to_string(), window, cx);
         });
 
         // Enter sends the message; other input events are ignored for now.
@@ -230,6 +258,11 @@ impl LanChatApp {
             input,
             handler,
             rt,
+            config,
+            settings_open: false,
+            settings_nickname,
+            settings_download,
+            settings_port,
         };
 
         // Consume UI events on GPUI's executor. `tokio::sync::mpsc::recv` is
@@ -596,6 +629,65 @@ impl LanChatApp {
         self.transfers.remove(transfer_id);
         cx.notify();
     }
+
+    /// Open the settings modal.
+    fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = true;
+        cx.notify();
+    }
+
+    /// Close the settings modal without saving.
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        cx.notify();
+    }
+
+    /// Read the settings form, persist it, and apply what can be applied live.
+    ///
+    /// The download directory is applied immediately (the core handler picks it
+    /// up for subsequent transfers); the nickname updates our sidebar display at
+    /// once but only reaches the network after a restart, as does the port.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let nickname = self.settings_nickname.read(cx).value().to_string();
+        let download_str = self.settings_download.read(cx).value().to_string();
+        let port_str = self.settings_port.read(cx).value().to_string();
+
+        let port = port_str.trim().parse::<u16>().unwrap_or(self.config.port);
+        let download_dir = if download_str.trim().is_empty() {
+            self.config.download_dir.clone()
+        } else {
+            PathBuf::from(download_str.trim())
+        };
+
+        let mut config = AppConfig {
+            nickname,
+            download_dir,
+            port,
+        };
+        config.normalize();
+
+        // Apply the download directory live.
+        if let Err(e) = self.handler.set_download_dir(config.download_dir.clone()) {
+            warn!(
+                "Failed to create download dir {:?}: {}",
+                config.download_dir, e
+            );
+        }
+
+        // Persist to disk off the UI thread.
+        let to_save = config.clone();
+        self.rt.spawn(async move {
+            if let Err(e) = to_save.save() {
+                warn!("Failed to save config: {}", e);
+            }
+        });
+
+        // Reflect the new nickname in our own display immediately.
+        self.local_name = config.nickname.clone();
+        self.config = config;
+        self.settings_open = false;
+        cx.notify();
+    }
 }
 
 impl Render for LanChatApp {
@@ -658,7 +750,16 @@ impl Render for LanChatApp {
             );
             rows.push(row);
         }
-        let sidebar_el = sidebar::render_sidebar(&local_name, peer_count, rows, palette);
+        let settings_this = this.clone();
+        let sidebar_el = sidebar::render_sidebar(
+            &local_name,
+            peer_count,
+            rows,
+            palette,
+            move |_, _, cx| {
+                settings_this.update(cx, |app, cx| app.open_settings(cx));
+            },
+        );
 
         // ── Chat panel ───────────────────────────────────────────────────
         let chat_el = match selected {
@@ -1045,6 +1146,24 @@ impl Render for LanChatApp {
                     .w(px(280.0))
                     .child(v_flex().w_full().gap(px(8.0)).children(transfer_cards)),
             );
+        }
+
+        if self.settings_open {
+            let save_this = this.clone();
+            let cancel_this = this.clone();
+            let modal = settings::render_settings_modal(
+                &self.settings_nickname,
+                &self.settings_download,
+                &self.settings_port,
+                palette,
+                move |_, _, cx| {
+                    save_this.update(cx, |app, cx| app.save_settings(cx));
+                },
+                move |_, _, cx| {
+                    cancel_this.update(cx, |app, cx| app.close_settings(cx));
+                },
+            );
+            root = root.child(modal);
         }
 
         root.children(Root::render_dialog_layer(window, cx))

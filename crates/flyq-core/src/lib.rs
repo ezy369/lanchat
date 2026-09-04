@@ -5,7 +5,9 @@
 //! storage operations and UI notifications.
 
 pub mod app_state;
+pub mod config;
 pub mod handlers;
 
 pub use app_state::AppState;
+pub use config::{AppConfig, DEFAULT_PORT};
 pub use handlers::{run_event_loop, EventHandler, HistoryMsg, IncomingFile, UiEvent};

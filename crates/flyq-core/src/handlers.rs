@@ -13,7 +13,7 @@ use flyq_protocol::{Command, Packet, PeerInfo};
 use flyq_storage::{Database, Page, StoredMessage};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -148,8 +148,9 @@ pub struct EventHandler {
     ui_tx: mpsc::Sender<UiEvent>,
     /// Registry of files we offer for download to peers.
     registry: FileRegistry,
-    /// Directory where incoming (accepted) files are saved.
-    download_dir: PathBuf,
+    /// Directory where incoming (accepted) files are saved. Wrapped in a lock
+    /// so the settings panel can change it at runtime.
+    download_dir: RwLock<PathBuf>,
     /// Our display name, sent when requesting a file download.
     local_name: String,
     /// Our hostname, sent when requesting a file download.
@@ -176,10 +177,31 @@ impl EventHandler {
             sender,
             ui_tx,
             registry,
-            download_dir,
+            download_dir: RwLock::new(download_dir),
             local_name,
             local_host,
         }
+    }
+
+    /// Current directory where incoming files are saved.
+    pub fn download_dir(&self) -> PathBuf {
+        self.download_dir
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| crate::config::default_download_dir())
+    }
+
+    /// Update the download directory at runtime (used by the settings panel).
+    ///
+    /// Best-effort creates the directory; returns the `create_dir_all` result so
+    /// the caller can surface an error, but stores the new path regardless.
+    pub fn set_download_dir(&self, dir: PathBuf) -> std::io::Result<()> {
+        let result = std::fs::create_dir_all(&dir);
+        if let Ok(mut guard) = self.download_dir.write() {
+            *guard = dir.clone();
+        }
+        info!("Download directory set to {:?}", dir);
+        result
     }
 
     /// Access the shared peer manager (e.g. to look up peer details).
@@ -643,7 +665,8 @@ impl EventHandler {
         let transfer_id = format!("{}:{}", from, file_id);
 
         // Ensure the download directory exists.
-        if let Err(e) = std::fs::create_dir_all(&self.download_dir) {
+        let download_dir = self.download_dir();
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
             let _ = self
                 .ui_tx
                 .send(UiEvent::FileFailed {
@@ -658,10 +681,9 @@ impl EventHandler {
         // Avoid clobbering an existing file by prefixing with the file id.
         let sanitized = filename
             .replace(['/', '\\', ':'], "_");
-        let mut dest = self.download_dir.join(&sanitized);
+        let mut dest = download_dir.join(&sanitized);
         if dest.exists() {
-            dest = self
-                .download_dir
+            dest = download_dir
                 .join(format!("{}_{}", file_id, sanitized));
         }
 
@@ -729,7 +751,8 @@ impl EventHandler {
         let transfer_id = format!("{}:{}", from, dir_file_id);
 
         // Ensure the download directory exists.
-        if let Err(e) = std::fs::create_dir_all(&self.download_dir) {
+        let download_dir = self.download_dir();
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
             let _ = self
                 .ui_tx
                 .send(UiEvent::FileFailed {
@@ -743,10 +766,9 @@ impl EventHandler {
 
         // Avoid clobbering an existing folder by prefixing with the file id.
         let sanitized = folder_name.replace(['/', '\\', ':'], "_");
-        let mut dest_base = self.download_dir.join(&sanitized);
+        let mut dest_base = download_dir.join(&sanitized);
         if dest_base.exists() {
-            dest_base = self
-                .download_dir
+            dest_base = download_dir
                 .join(format!("{}_{}", dir_file_id, sanitized));
         }
 

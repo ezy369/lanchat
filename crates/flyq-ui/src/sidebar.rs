@@ -3,7 +3,8 @@
 use flyq_protocol::PeerInfo;
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, App, ClickEvent, FontWeight, Window};
-use gpui_component::{h_flex, v_flex};
+use gpui_component::button::Button;
+use gpui_component::{h_flex, v_flex, Sizable};
 
 use crate::app::{status_color, Palette};
 
@@ -13,13 +14,12 @@ pub fn render_sidebar(
     peer_count: usize,
     rows: Vec<AnyElement>,
     palette: Palette,
+    on_open_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let header = v_flex()
-        .px(px(14.0))
-        .py(px(12.0))
+    let title_block = v_flex()
+        .flex_1()
+        .overflow_hidden()
         .gap(px(2.0))
-        .border_b_1()
-        .border_color(palette.border)
         .child(
             div()
                 .text_base()
@@ -32,6 +32,22 @@ pub fn render_sidebar(
                 .text_xs()
                 .text_color(palette.muted_foreground)
                 .child(format!("{} · {} online", local_name, peer_count)),
+        );
+
+    let header = h_flex()
+        .w_full()
+        .px(px(14.0))
+        .py(px(12.0))
+        .gap(px(8.0))
+        .items_center()
+        .border_b_1()
+        .border_color(palette.border)
+        .child(title_block)
+        .child(
+            Button::new("settings-btn")
+                .xsmall()
+                .label("设置")
+                .on_click(on_open_settings),
         );
 
     let list = if rows.is_empty() {
