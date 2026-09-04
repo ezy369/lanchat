@@ -151,6 +151,8 @@ impl Palette {
 pub struct LanChatApp {
     /// Our own display name (shown in the sidebar header).
     local_name: String,
+    /// Our own presence status (shown in the sidebar; broadcast to peers).
+    local_status: UserStatus,
     /// Currently online peers.
     peers: Vec<PeerInfo>,
     /// Addr of the peer whose conversation is open (if any).
@@ -244,6 +246,7 @@ impl LanChatApp {
 
         let app = Self {
             local_name,
+            local_status: config.status,
             peers: Vec::new(),
             selected: None,
             conversations: HashMap::new(),
@@ -642,6 +645,28 @@ impl LanChatApp {
         cx.notify();
     }
 
+    /// Cycle our presence status (在线 → 离开 → 忙碌 → 在线), broadcast the new
+    /// status to the LAN, and persist it so it is restored on next launch.
+    fn cycle_status(&mut self, cx: &mut Context<Self>) {
+        let next = match self.local_status {
+            UserStatus::Online => UserStatus::Away,
+            UserStatus::Away => UserStatus::Busy,
+            _ => UserStatus::Online,
+        };
+        self.local_status = next;
+        self.config.status = next;
+
+        let handler = self.handler.clone();
+        let to_save = self.config.clone();
+        self.rt.spawn(async move {
+            handler.set_status(next).await;
+            if let Err(e) = to_save.save() {
+                warn!("Failed to save config: {}", e);
+            }
+        });
+        cx.notify();
+    }
+
     /// Read the settings form, persist it, and apply what can be applied live.
     ///
     /// The download directory is applied immediately (the core handler picks it
@@ -663,6 +688,7 @@ impl LanChatApp {
             nickname,
             download_dir,
             port,
+            status: self.config.status,
         };
         config.normalize();
 
@@ -699,6 +725,7 @@ impl Render for LanChatApp {
         let rt = self.rt.clone();
         let selected = self.selected;
         let local_name = self.local_name.clone();
+        let local_status = self.local_status;
         let peer_count = self.peers.len();
 
         // ── Screen-shake (knock) animation ───────────────────────────────
@@ -751,13 +778,18 @@ impl Render for LanChatApp {
             rows.push(row);
         }
         let settings_this = this.clone();
+        let status_this = this.clone();
         let sidebar_el = sidebar::render_sidebar(
             &local_name,
+            local_status,
             peer_count,
             rows,
             palette,
             move |_, _, cx| {
                 settings_this.update(cx, |app, cx| app.open_settings(cx));
+            },
+            move |_, _, cx| {
+                status_this.update(cx, |app, cx| app.cycle_status(cx));
             },
         );
 

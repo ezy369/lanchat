@@ -8,9 +8,9 @@
 //! discovery service, allowing message sending from any task.
 
 use flyq_protocol::command::flags;
-use flyq_protocol::{Command, PacketBuilder};
+use flyq_protocol::{Command, PacketBuilder, UserStatus};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::UdpSocket;
@@ -51,6 +51,14 @@ pub struct MessageSender {
     socket: Arc<UdpSocket>,
     identity: SenderIdentity,
     packet_no: Arc<AtomicU32>,
+    /// Broadcast addresses for LAN-wide presence announcements.
+    broadcast_addrs: Vec<SocketAddr>,
+    /// The port presence broadcasts target (usually 2425).
+    port: u16,
+    /// Shared presence status. The discovery loop reads this to decide whether
+    /// its periodic broadcast is an entry or an absence announcement, and
+    /// [`MessageSender::set_status`] writes it.
+    status: Arc<AtomicU8>,
 }
 
 impl MessageSender {
@@ -59,11 +67,17 @@ impl MessageSender {
         socket: Arc<UdpSocket>,
         identity: SenderIdentity,
         packet_no: Arc<AtomicU32>,
+        broadcast_addrs: Vec<SocketAddr>,
+        port: u16,
+        status: Arc<AtomicU8>,
     ) -> Self {
         Self {
             socket,
             identity,
             packet_no,
+            broadcast_addrs,
+            port,
+            status,
         }
     }
 
@@ -267,6 +281,43 @@ impl MessageSender {
     pub async fn send_absence(&self, to: SocketAddr) -> Result<(), MessageError> {
         let packet = self.build(Command::BrAbsence, flags::IPMSG_ABSENCEOPT, None);
         self.send_packet(&packet, to).await
+    }
+
+    /// Our current presence status.
+    pub fn status(&self) -> UserStatus {
+        UserStatus::from_u8(self.status.load(Ordering::Relaxed))
+    }
+
+    /// Set our presence status and broadcast the change to the whole LAN.
+    ///
+    /// Online is announced with `BrEntry`; Away and Busy are announced with
+    /// `BrAbsence` (IPMsg has no distinct busy signal, so peers show us as
+    /// away). The new status is stored in the shared atomic so the discovery
+    /// loop's periodic re-broadcast keeps advertising it.
+    pub async fn set_status(&self, status: UserStatus) -> Result<(), MessageError> {
+        self.status.store(status.to_u8(), Ordering::Relaxed);
+
+        let (cmd, cmd_flags) = if status.is_absence() {
+            (Command::BrAbsence, flags::IPMSG_ABSENCEOPT)
+        } else {
+            let online_flags = if self.identity.use_feiq_version {
+                flags::FEIQ_ONLINE_FLAGS
+            } else {
+                0
+            };
+            (Command::BrEntry, online_flags)
+        };
+
+        let packet = self.build(cmd, cmd_flags, None);
+        let bytes = packet.as_bytes();
+        for &addr in &self.broadcast_addrs {
+            let _ = self.socket.send_to(bytes, addr).await;
+        }
+        let fallback = SocketAddr::from(([255, 255, 255, 255], self.port));
+        let _ = self.socket.send_to(bytes, fallback).await;
+
+        debug!("Broadcast presence status {:?} to {} addresses", status, self.broadcast_addrs.len());
+        Ok(())
     }
 
     // ─── Raw Packet ─────────────────────────────────────────────────────

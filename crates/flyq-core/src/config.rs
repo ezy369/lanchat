@@ -9,6 +9,7 @@
 //! baked into the discovery/transport sockets at launch, so they take effect on
 //! the next start of the application.
 
+use flyq_protocol::UserStatus;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,8 @@ pub struct AppConfig {
     pub download_dir: PathBuf,
     /// UDP/TCP port for discovery and file transfer.
     pub port: u16,
+    /// Our presence status, broadcast to peers and restored on next launch.
+    pub status: UserStatus,
 }
 
 impl Default for AppConfig {
@@ -37,6 +40,7 @@ impl Default for AppConfig {
             nickname: default_nickname(),
             download_dir: default_download_dir(),
             port: DEFAULT_PORT,
+            status: UserStatus::Online,
         }
     }
 }
@@ -200,11 +204,13 @@ mod tests {
             nickname: "Alice".to_string(),
             download_dir: PathBuf::from("/tmp/files"),
             port: 3000,
+            status: UserStatus::Away,
         };
         cfg.save_to(&path).expect("save should succeed");
 
         let loaded = AppConfig::load_from(&path);
         assert_eq!(loaded, cfg);
+        assert_eq!(loaded.status, UserStatus::Away);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -228,6 +234,7 @@ mod tests {
         assert_eq!(loaded.port, 4000);
         assert_eq!(loaded.nickname, default_nickname());
         assert_eq!(loaded.download_dir, default_download_dir());
+        assert_eq!(loaded.status, UserStatus::Online);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -252,6 +259,7 @@ mod tests {
             nickname: "   ".to_string(),
             download_dir: PathBuf::from("/keep"),
             port: 0,
+            status: UserStatus::Online,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -266,6 +274,7 @@ mod tests {
             nickname: "  Bob  ".to_string(),
             download_dir: PathBuf::from("/d"),
             port: 2425,
+            status: UserStatus::Online,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -278,6 +287,7 @@ mod tests {
             nickname: "Carol".to_string(),
             download_dir: PathBuf::from("/d"),
             port: 2425,
+            status: UserStatus::Online,
         };
         assert!(!cfg.normalize());
     }

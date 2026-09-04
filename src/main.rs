@@ -45,6 +45,7 @@ async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String, App
         config.username = app_config.nickname.clone();
     }
     config.port = app_config.port;
+    config.initial_status = app_config.status;
     let local_name = config.username.clone();
     let local_host = config.hostname.clone();
     let port = config.port;

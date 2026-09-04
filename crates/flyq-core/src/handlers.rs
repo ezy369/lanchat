@@ -9,7 +9,7 @@ use flyq_network::{
     ProgressCallback,
 };
 use flyq_protocol::command::flags;
-use flyq_protocol::{Command, Packet, PeerInfo};
+use flyq_protocol::{Command, Packet, PeerInfo, UserStatus};
 use flyq_storage::{Database, Page, StoredMessage};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -531,6 +531,17 @@ impl EventHandler {
     pub async fn send_knock(&self, to: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.sender.send_knock(to).await?;
         Ok(())
+    }
+
+    /// Set our presence status and broadcast the change to the LAN.
+    ///
+    /// Online is announced with `BrEntry`; Away/Busy with `BrAbsence`. The new
+    /// status also becomes the one the discovery loop re-advertises on its
+    /// periodic heartbeat.
+    pub async fn set_status(&self, status: UserStatus) {
+        if let Err(e) = self.sender.set_status(status).await {
+            warn!("Failed to broadcast status {:?}: {}", status, e);
+        }
     }
 
     /// Load conversation history for `peer` from the database and emit it to

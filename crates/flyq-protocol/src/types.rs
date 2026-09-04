@@ -54,9 +54,10 @@ impl PeerInfo {
 }
 
 /// Online status of a user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UserStatus {
     /// User is online and available.
+    #[default]
     Online,
     /// User is away.
     Away,
@@ -66,9 +67,43 @@ pub enum UserStatus {
     Offline,
 }
 
-impl Default for UserStatus {
-    fn default() -> Self {
-        Self::Online
+impl UserStatus {
+    /// Encode as a `u8` for atomic storage (shared presence state).
+    pub fn to_u8(self) -> u8 {
+        match self {
+            UserStatus::Online => 0,
+            UserStatus::Away => 1,
+            UserStatus::Busy => 2,
+            UserStatus::Offline => 3,
+        }
+    }
+
+    /// Decode from the `u8` produced by [`UserStatus::to_u8`]. Unknown values
+    /// fall back to [`UserStatus::Online`].
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => UserStatus::Away,
+            2 => UserStatus::Busy,
+            3 => UserStatus::Offline,
+            _ => UserStatus::Online,
+        }
+    }
+
+    /// Whether this status is announced on the wire as IPMsg absence
+    /// (`BrAbsence`). IPMsg has no distinct "busy" signal, so both Away and Busy
+    /// map to absence; peers will show us as away.
+    pub fn is_absence(self) -> bool {
+        matches!(self, UserStatus::Away | UserStatus::Busy)
+    }
+
+    /// Human-readable label used by the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            UserStatus::Online => "在线",
+            UserStatus::Away => "离开",
+            UserStatus::Busy => "忙碌",
+            UserStatus::Offline => "离线",
+        }
     }
 }
 
@@ -100,4 +135,48 @@ pub struct FileAttachment {
     pub size: u64,
     /// File type / extension.
     pub file_type: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_u8_roundtrip() {
+        for status in [
+            UserStatus::Online,
+            UserStatus::Away,
+            UserStatus::Busy,
+            UserStatus::Offline,
+        ] {
+            assert_eq!(UserStatus::from_u8(status.to_u8()), status);
+        }
+    }
+
+    #[test]
+    fn status_from_unknown_u8_defaults_online() {
+        assert_eq!(UserStatus::from_u8(99), UserStatus::Online);
+    }
+
+    #[test]
+    fn absence_covers_away_and_busy_only() {
+        assert!(UserStatus::Away.is_absence());
+        assert!(UserStatus::Busy.is_absence());
+        assert!(!UserStatus::Online.is_absence());
+        assert!(!UserStatus::Offline.is_absence());
+    }
+
+    #[test]
+    fn status_labels_are_distinct() {
+        let labels = [
+            UserStatus::Online.label(),
+            UserStatus::Away.label(),
+            UserStatus::Busy.label(),
+            UserStatus::Offline.label(),
+        ];
+        for l in labels {
+            assert!(!l.is_empty());
+            assert_eq!(labels.iter().filter(|&&x| x == l).count(), 1);
+        }
+    }
 }

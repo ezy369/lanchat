@@ -17,7 +17,7 @@
 use flyq_protocol::command::flags;
 use flyq_protocol::{Command, Packet, PacketBuilder, PacketParser, PeerInfo, UserStatus};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -90,6 +90,9 @@ pub struct DiscoveryConfig {
     pub use_feiq_version: bool,
     /// Group name to broadcast (FeiQ group feature).
     pub group_name: Option<String>,
+    /// Our initial presence status, broadcast on startup and used for the
+    /// periodic re-broadcast until the user changes it.
+    pub initial_status: UserStatus,
 }
 
 impl Default for DiscoveryConfig {
@@ -106,6 +109,7 @@ impl Default for DiscoveryConfig {
             peer_timeout: Duration::from_secs(PEER_TIMEOUT_SECS),
             use_feiq_version: true,
             group_name: None,
+            initial_status: UserStatus::Online,
         }
     }
 }
@@ -116,6 +120,9 @@ pub struct DiscoveryService {
     config: DiscoveryConfig,
     packet_no: Arc<AtomicU32>,
     broadcast_addrs: Vec<SocketAddr>,
+    /// Shared presence status; read by the broadcast loop, written by
+    /// `MessageSender::set_status`.
+    current_status: Arc<AtomicU8>,
     event_tx: mpsc::Sender<DiscoveryEvent>,
     event_rx: Option<mpsc::Receiver<DiscoveryEvent>>,
     shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
@@ -149,6 +156,7 @@ impl DiscoveryService {
 
         Ok(Self {
             socket: Arc::new(socket),
+            current_status: Arc::new(AtomicU8::new(config.initial_status.to_u8())),
             config,
             packet_no: Arc::new(AtomicU32::new(initial_no)),
             broadcast_addrs,
@@ -189,6 +197,9 @@ impl DiscoveryService {
                 use_feiq_version: self.config.use_feiq_version,
             },
             Arc::clone(&self.packet_no),
+            self.broadcast_addrs.clone(),
+            self.config.port,
+            Arc::clone(&self.current_status),
         )
     }
 
@@ -209,6 +220,10 @@ impl DiscoveryService {
         // FeiQ online broadcasts include ENCOPT|FILEATTACHOPT flags.
         if self.config.use_feiq_version && matches!(cmd, Command::BrEntry | Command::AnsEntry) {
             builder = builder.flag(flags::FEIQ_ONLINE_FLAGS);
+        }
+        // Absence broadcasts carry the ABSENCEOPT flag.
+        if cmd == Command::BrAbsence {
+            builder = builder.flag(flags::IPMSG_ABSENCEOPT);
         }
 
         // Add group name or extra data.
@@ -289,18 +304,20 @@ impl DiscoveryService {
         let config = self.config.clone();
         let packet_no = Arc::clone(&self.packet_no);
         let broadcast_addrs = self.broadcast_addrs.clone();
+        let current_status = Arc::clone(&self.current_status);
         let event_tx = self.event_tx.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
 
         let handle = tokio::spawn(async move {
-            // Initial presence broadcast.
-            let initial_packet = build_packet_inner(&config, &packet_no, Command::BrEntry, None);
+            // Initial presence broadcast (entry or absence, per our status).
+            let initial_cmd = presence_command(&current_status);
+            let initial_packet = build_packet_inner(&config, &packet_no, initial_cmd, None);
             for &addr in &broadcast_addrs {
                 let _ = socket.send_to(initial_packet.as_bytes(), addr).await;
             }
             let fallback = SocketAddr::from(([255, 255, 255, 255], config.port));
             let _ = socket.send_to(initial_packet.as_bytes(), fallback).await;
-            info!("Discovery service started, initial broadcast sent");
+            info!("Discovery service started, initial broadcast sent ({:?})", initial_cmd);
 
             let mut broadcast_timer = interval(config.broadcast_interval);
             broadcast_timer.tick().await; // First tick is immediate, skip it.
@@ -328,12 +345,13 @@ impl DiscoveryService {
 
                     // Periodic presence broadcast.
                     _ = broadcast_timer.tick() => {
-                        let packet = build_packet_inner(&config, &packet_no, Command::BrEntry, None);
+                        let cmd = presence_command(&current_status);
+                        let packet = build_packet_inner(&config, &packet_no, cmd, None);
                         for &addr in &broadcast_addrs {
                             let _ = socket.send_to(packet.as_bytes(), addr).await;
                         }
                         let _ = socket.send_to(packet.as_bytes(), fallback).await;
-                        debug!("Periodic presence broadcast sent");
+                        debug!("Periodic presence broadcast sent ({:?})", cmd);
                     }
 
                     // Peer timeout check.
@@ -522,6 +540,9 @@ fn build_packet_inner(
     if config.use_feiq_version && matches!(cmd, Command::BrEntry | Command::AnsEntry) {
         builder = builder.flag(flags::FEIQ_ONLINE_FLAGS);
     }
+    if cmd == Command::BrAbsence {
+        builder = builder.flag(flags::IPMSG_ABSENCEOPT);
+    }
 
     let extra_data = extra.or(config.group_name.as_deref());
     if let Some(data) = extra_data {
@@ -529,6 +550,16 @@ fn build_packet_inner(
     }
 
     builder.build()
+}
+
+/// Choose the presence command for our current status: `BrAbsence` when away or
+/// busy, otherwise `BrEntry`.
+fn presence_command(status: &AtomicU8) -> Command {
+    if UserStatus::from_u8(status.load(Ordering::Relaxed)).is_absence() {
+        Command::BrAbsence
+    } else {
+        Command::BrEntry
+    }
 }
 
 /// Discover broadcast addresses from all active network interfaces.

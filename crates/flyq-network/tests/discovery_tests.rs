@@ -164,6 +164,7 @@ async fn test_discovery_service_creation() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     // Port 0 won't work with our bind logic (we bind to 0.0.0.0:port).
@@ -193,6 +194,7 @@ async fn test_discovery_two_peers_loopback() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let config_b = DiscoveryConfig {
@@ -205,6 +207,7 @@ async fn test_discovery_two_peers_loopback() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let service_a = DiscoveryService::new(config_a).await.unwrap();
@@ -277,6 +280,7 @@ async fn test_discovery_br_exit_removes_peer() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let service = DiscoveryService::new(config).await.unwrap();
@@ -339,6 +343,7 @@ async fn test_discovery_message_forwarding() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let service = DiscoveryService::new(config).await.unwrap();
@@ -388,6 +393,7 @@ async fn test_discovery_typing_indicator() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let service = DiscoveryService::new(config).await.unwrap();
@@ -433,6 +439,7 @@ async fn test_discovery_graceful_shutdown() {
         peer_timeout: Duration::from_secs(3600),
         use_feiq_version: true,
         group_name: None,
+        initial_status: UserStatus::Online,
     };
 
     let service = DiscoveryService::new(config).await.unwrap();
@@ -463,4 +470,58 @@ async fn test_discovery_config_default() {
     assert_eq!(config.mac_address.len(), 12); // 12 hex chars
     assert_eq!(config.broadcast_interval, Duration::from_secs(60));
     assert_eq!(config.peer_timeout, Duration::from_secs(180));
+    assert_eq!(config.initial_status, UserStatus::Online);
+}
+
+#[tokio::test]
+async fn test_discovery_absence_marks_peer_away() {
+    let pm = PeerManager::new();
+
+    let config = DiscoveryConfig {
+        username: "Listener".to_string(),
+        hostname: "LISTEN-PC".to_string(),
+        mac_address: "ABCDEF012345".to_string(),
+        feiq_level: 128,
+        port: 19507,
+        broadcast_interval: Duration::from_secs(3600),
+        peer_timeout: Duration::from_secs(3600),
+        use_feiq_version: true,
+        group_name: None,
+        initial_status: UserStatus::Online,
+    };
+
+    let service = DiscoveryService::new(config).await.unwrap();
+    let shutdown = service.shutdown_handle();
+    let (mut rx, _handle) = service.spawn(pm.clone());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A peer announces itself as absent (BrAbsence + ABSENCEOPT).
+    let absence_packet = flyq_protocol::PacketBuilder::new_feiq("ABCDEF999999", 128)
+        .sender("Away", "AWAY-PC")
+        .packet_no(4000)
+        .command(Command::BrAbsence)
+        .flag(flyq_protocol::command::flags::IPMSG_ABSENCEOPT)
+        .build();
+
+    let target = SocketAddr::from(([127, 0, 0, 1], 19507));
+    let tmp_sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    tmp_sock.send_to(absence_packet.as_bytes(), target).await.unwrap();
+
+    let event = timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+    match event {
+        DiscoveryEvent::PeerJoined(peer) => {
+            assert_eq!(peer.name, "Away");
+            assert_eq!(peer.status, UserStatus::Away);
+        }
+        other => panic!("Expected PeerJoined with Away status, got {:?}", other),
+    }
+
+    let stored = pm
+        .get_peer_by_addr(&IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .await
+        .expect("peer should be tracked");
+    assert_eq!(stored.status, UserStatus::Away);
+
+    shutdown.shutdown();
 }

@@ -1,6 +1,6 @@
 //! Sidebar component showing online peers.
 
-use flyq_protocol::PeerInfo;
+use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, App, ClickEvent, FontWeight, Window};
 use gpui_component::button::Button;
@@ -9,12 +9,17 @@ use gpui_component::{h_flex, v_flex, Sizable};
 use crate::app::{status_color, Palette};
 
 /// Render the full sidebar: a header plus the scrollable peer list.
+///
+/// The header shows our own presence status as a clickable pill; clicking it
+/// invokes `on_cycle_status` to advance 在线 → 离开 → 忙碌.
 pub fn render_sidebar(
     local_name: &str,
+    local_status: UserStatus,
     peer_count: usize,
     rows: Vec<AnyElement>,
     palette: Palette,
     on_open_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_cycle_status: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let title_block = v_flex()
         .flex_1()
@@ -34,14 +39,10 @@ pub fn render_sidebar(
                 .child(format!("{} · {} online", local_name, peer_count)),
         );
 
-    let header = h_flex()
+    let top_row = h_flex()
         .w_full()
-        .px(px(14.0))
-        .py(px(12.0))
         .gap(px(8.0))
         .items_center()
-        .border_b_1()
-        .border_color(palette.border)
         .child(title_block)
         .child(
             Button::new("settings-btn")
@@ -49,6 +50,51 @@ pub fn render_sidebar(
                 .label("设置")
                 .on_click(on_open_settings),
         );
+
+    let dot_color = status_color(local_status, true, palette);
+    let status_pill = div()
+        .id("status-pill")
+        .on_click(on_cycle_status)
+        .cursor_pointer()
+        .px(px(9.0))
+        .py(px(4.0))
+        .rounded(px(11.0))
+        .bg(palette.muted)
+        .hover(|s| s.bg(palette.accent))
+        .child(
+            h_flex()
+                .gap(px(6.0))
+                .items_center()
+                .child(
+                    div()
+                        .size(px(8.0))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(dot_color),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.foreground)
+                        .child(format!("我的状态 · {}", local_status.label())),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.muted_foreground)
+                        .child("切换"),
+                ),
+        );
+
+    let header = v_flex()
+        .w_full()
+        .px(px(14.0))
+        .py(px(12.0))
+        .gap(px(9.0))
+        .border_b_1()
+        .border_color(palette.border)
+        .child(top_row)
+        .child(status_pill);
 
     let list = if rows.is_empty() {
         div()
