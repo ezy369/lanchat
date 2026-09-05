@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::chat;
+use crate::notify;
 use crate::settings;
 use crate::sidebar;
 use crate::tokio_runtime::Tokio;
@@ -328,6 +329,12 @@ impl LanChatApp {
             } => {
                 self.names.insert(sender_addr, sender.clone());
                 self.typing.remove(&sender_addr);
+                // Notify only when this conversation is not already open; if the
+                // user is looking at it, a system toast is just noise.
+                let viewing = self.selected == Some(sender_addr);
+                if !viewing {
+                    notify::message(&self.rt, &sender, &content);
+                }
                 self.conversations.entry(sender_addr).or_default().push(ChatMsg {
                     id,
                     text: content,
@@ -339,7 +346,7 @@ impl LanChatApp {
                 });
                 // If this conversation is currently open, acknowledge the read
                 // immediately so the peer sees the "read" state.
-                if self.selected == Some(sender_addr) {
+                if viewing {
                     self.acknowledge_reads(sender_addr);
                 }
             }
@@ -418,6 +425,9 @@ impl LanChatApp {
                 msg_id: _,
                 files,
             } => {
+                // Always notify: an incoming file needs the user's attention to
+                // accept or reject it.
+                notify::file_offer(&self.rt, &name, files.len());
                 for f in files {
                     self.file_offers.push(FileOfferPrompt {
                         from,
@@ -452,6 +462,7 @@ impl LanChatApp {
                 filename,
                 path,
             } => {
+                notify::file_complete(&self.rt, &filename);
                 let t = self.transfers.entry(transfer_id).or_insert(Transfer {
                     filename,
                     received: 0,

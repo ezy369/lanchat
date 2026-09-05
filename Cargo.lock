@@ -2100,6 +2100,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "notify-rust",
  "tokio",
  "tracing",
 ]

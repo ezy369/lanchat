@@ -12,6 +12,7 @@
 
 pub mod app;
 pub mod chat;
+mod notify;
 pub mod settings;
 pub mod sidebar;
 pub mod tokio_runtime;
