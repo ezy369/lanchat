@@ -9,8 +9,8 @@ use flyq_network::{
     ProgressCallback,
 };
 use flyq_protocol::command::flags;
-use flyq_protocol::{Command, Packet, PeerInfo, UserStatus};
-use flyq_storage::{Database, Page, StoredMessage};
+use flyq_protocol::{Command, GroupPayload, Packet, PeerInfo, UserStatus};
+use flyq_storage::{Database, Group, Page, StoredMessage};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -136,6 +136,26 @@ pub enum UiEvent {
     MessageDeleted {
         sender_addr: SocketAddr,
         packet_no: u32,
+    },
+    /// A group chat message was received.
+    GroupMessageReceived {
+        group_id: String,
+        group_name: String,
+        sender: String,
+        sender_addr: SocketAddr,
+        content: String,
+        timestamp: i64,
+        packet_no: u32,
+    },
+    /// A new group was created locally.
+    GroupCreated {
+        group_id: String,
+        group_name: String,
+        members: Vec<String>,
+    },
+    /// A group was deleted.
+    GroupDeleted {
+        group_id: String,
     },
 }
 
@@ -285,9 +305,8 @@ impl EventHandler {
             Command::GetFileData | Command::ReleaseFiles | Command::GetDirFiles => {
                 debug!("Transport-layer command {:?} from {} (no-op at handler level)", packet.command, from);
             }
-            // GroupMsg is handled in M7.
             Command::GroupMsg => {
-                debug!("GroupMsg from {} — not yet implemented (M7)", from);
+                self.handle_group_msg(from, &packet).await;
             }
             Command::Unknown => {
                 debug!("Unknown command from {} (flags=0x{:08x})", from, packet.command_flags);
@@ -361,6 +380,7 @@ impl EventHandler {
             timestamp,
             read: false,
             packet_no: Some(packet.packet_no),
+            group_id: None,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store message: {}", e);
@@ -676,6 +696,7 @@ impl EventHandler {
             timestamp,
             read: false,
             packet_no: Some(packet.packet_no),
+            group_id: None,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store image message: {}", e);
@@ -688,6 +709,97 @@ impl EventHandler {
                 sender: packet.sender_name,
                 sender_addr: from,
                 content,
+                timestamp,
+                packet_no: packet.packet_no,
+            })
+            .await;
+    }
+
+    /// Handle an incoming GroupMsg (0x23) — group chat message.
+    ///
+    /// Parses the extra field to extract group name and message text using
+    /// the `GroupPayload` format (`"{groupName}\0{messageText}"`). Matches
+    /// the group name to a local group; if no match is found, auto-creates
+    /// a new group with just the sender as member.
+    async fn handle_group_msg(&self, from: SocketAddr, packet: &Packet) {
+        let extra = match &packet.extra {
+            Some(e) => e.as_str(),
+            None => {
+                debug!("GroupMsg from {} with no extra field", from);
+                return;
+            }
+        };
+
+        let (group_name, content) = GroupPayload::parse_extra(extra);
+
+        // Find or auto-create group by name.
+        let group = match self.db.get_group_by_name(group_name).await {
+            Ok(Some(g)) => g,
+            Ok(None) => {
+                // Auto-create group with sender as sole member.
+                let new_group = Group {
+                    id: Uuid::new_v4().to_string(),
+                    name: group_name.to_string(),
+                    members: vec![format!("{}:{}", from.ip(), from.port())],
+                    created_at: now_timestamp(),
+                };
+                if let Err(e) = self.db.insert_group(&new_group).await {
+                    warn!("Failed to auto-create group '{}': {}", group_name, e);
+                    return;
+                }
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::GroupCreated {
+                        group_id: new_group.id.clone(),
+                        group_name: new_group.name.clone(),
+                        members: new_group.members.clone(),
+                    })
+                    .await;
+                info!("Auto-created group '{}' (id={})", group_name, new_group.id);
+                new_group
+            }
+            Err(e) => {
+                warn!("Failed to look up group '{}': {}", group_name, e);
+                return;
+            }
+        };
+
+        let timestamp = now_timestamp();
+        let msg_id = Uuid::new_v4().to_string();
+        let peer_id = format!("{}:{}", from.ip(), from.port());
+
+        // Persist group message.
+        let stored = StoredMessage {
+            id: msg_id.clone(),
+            sender: peer_id.clone(),
+            recipient: String::new(),
+            content: content.to_string(),
+            timestamp,
+            read: false,
+            packet_no: Some(packet.packet_no),
+            group_id: Some(group.id.clone()),
+        };
+        if let Err(e) = self.db.insert_message(&stored).await {
+            warn!("Failed to store group message: {}", e);
+        }
+
+        // Send delivery receipt if requested.
+        if packet.has_flag(flags::IPMSG_SENDCHECKOPT) {
+            let _ = self
+                .sender
+                .send_delivery_receipt(from, packet.packet_no)
+                .await;
+        }
+
+        // Emit UI event.
+        let _ = self
+            .ui_tx
+            .send(UiEvent::GroupMessageReceived {
+                group_id: group.id,
+                group_name: group.name,
+                sender: packet.sender_name.clone(),
+                sender_addr: from,
+                content: content.to_string(),
                 timestamp,
                 packet_no: packet.packet_no,
             })
@@ -719,6 +831,7 @@ impl EventHandler {
             timestamp,
             read: true, // Our own messages are always "read".
             packet_no: Some(packet_no),
+            group_id: None,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent message: {}", e);
@@ -737,6 +850,80 @@ impl EventHandler {
             .await;
 
         Ok((msg_id, packet_no))
+    }
+
+    /// Send a group chat message to all members of a group.
+    ///
+    /// Fans out `send_group_message` to every member address, persists the
+    /// message locally with `group_id`, and emits a `GroupMessageReceived`
+    /// event so the UI shows our own message in the group conversation.
+    pub async fn send_group_chat_message(
+        &self,
+        group_id: &str,
+        content: &str,
+    ) -> Result<(String, u32), Box<dyn std::error::Error + Send + Sync>> {
+        // Look up group.
+        let groups = self.db.get_groups().await?;
+        let group = groups
+            .iter()
+            .find(|g| g.id == group_id)
+            .ok_or_else(|| format!("Group {} not found", group_id))?;
+
+        let msg_id = Uuid::new_v4().to_string();
+        let timestamp = now_timestamp();
+        let mut last_packet_no = 0u32;
+
+        // Fan-out: send to each member.
+        for member_addr_str in &group.members {
+            if let Ok(addr) = member_addr_str.parse::<SocketAddr>() {
+                match self
+                    .sender
+                    .send_group_message(addr, &group.name, content)
+                    .await
+                {
+                    Ok(no) => last_packet_no = no,
+                    Err(e) => {
+                        warn!("Failed to send group message to {}: {}", addr, e);
+                    }
+                }
+            } else {
+                warn!("Invalid member address: {}", member_addr_str);
+            }
+        }
+
+        // Persist locally.
+        let stored = StoredMessage {
+            id: msg_id.clone(),
+            sender: self.local_id.clone(),
+            recipient: String::new(),
+            content: content.to_string(),
+            timestamp,
+            read: true,
+            packet_no: Some(last_packet_no),
+            group_id: Some(group.id.clone()),
+        };
+        if let Err(e) = self.db.insert_message(&stored).await {
+            warn!("Failed to store sent group message: {}", e);
+        }
+
+        // Emit UI event for our own message.
+        let local_addr = self.sender.local_addr().unwrap_or_else(|_| {
+            SocketAddr::from(([127, 0, 0, 1], 2425))
+        });
+        let _ = self
+            .ui_tx
+            .send(UiEvent::GroupMessageReceived {
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
+                sender: "You".to_string(),
+                sender_addr: local_addr,
+                content: content.to_string(),
+                timestamp,
+                packet_no: last_packet_no,
+            })
+            .await;
+
+        Ok((msg_id, last_packet_no))
     }
 
     /// Send read receipts (ReadMsg) for a batch of received packet numbers.
@@ -890,6 +1077,7 @@ impl EventHandler {
             timestamp,
             read: true,
             packet_no: Some(packet_no),
+            group_id: None,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent file message: {}", e);
@@ -1102,6 +1290,96 @@ impl EventHandler {
     /// the prompt locally, so no event is emitted here.
     pub async fn reject_file(&self, from: SocketAddr, file_id: u32, filename: String) {
         info!("Rejected file {} (id={}) from {}", filename, file_id, from);
+    }
+
+    // ─── Group Lifecycle ─────────────────────────────────────────────────
+
+    /// Create a new group with the given name and member addresses.
+    ///
+    /// Generates a UUID, inserts the group into the database, and emits a
+    /// `GroupCreated` event so the UI can update the sidebar.
+    pub async fn create_group(
+        &self,
+        name: &str,
+        members: Vec<String>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let group = Group {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            members: members.clone(),
+            created_at: now_timestamp(),
+        };
+        self.db.insert_group(&group).await?;
+        info!("Created group '{}' (id={}) with {} members", name, group.id, members.len());
+
+        let _ = self
+            .ui_tx
+            .send(UiEvent::GroupCreated {
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
+                members,
+            })
+            .await;
+
+        Ok(group.id)
+    }
+
+    /// Delete a group by ID. Associated messages are not deleted.
+    pub async fn delete_group(
+        &self,
+        group_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.db.delete_group(group_id).await?;
+        info!("Deleted group {}", group_id);
+
+        let _ = self
+            .ui_tx
+            .send(UiEvent::GroupDeleted {
+                group_id: group_id.to_string(),
+            })
+            .await;
+
+        Ok(())
+    }
+
+    /// Load all groups from the database.
+    pub async fn get_groups(
+        &self,
+    ) -> Result<Vec<Group>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.db.get_groups().await?)
+    }
+
+    /// Load group message history and emit it as HistoryLoaded-like events.
+    ///
+    /// For group conversations, we emit `GroupMessageReceived` events for each
+    /// historical message so the UI can render them in the group chat panel.
+    pub async fn request_group_history(&self, group_id: &str, limit: u32) {
+        let page = Page::new(limit, 0);
+        match self.db.get_group_messages_paged(group_id, page).await {
+            Ok(result) => {
+                for msg in result.items {
+                    let _ = self
+                        .ui_tx
+                        .send(UiEvent::GroupMessageReceived {
+                            group_id: group_id.to_string(),
+                            group_name: String::new(), // UI already knows from GroupCreated
+                            sender: if msg.sender == self.local_id {
+                                "You".to_string()
+                            } else {
+                                msg.sender.clone()
+                            },
+                            sender_addr: msg.sender.parse().unwrap_or_else(|_| {
+                                SocketAddr::from(([127, 0, 0, 1], 2425))
+                            }),
+                            content: msg.content,
+                            timestamp: msg.timestamp,
+                            packet_no: msg.packet_no.unwrap_or(0),
+                        })
+                        .await;
+                }
+            }
+            Err(e) => warn!("Failed to load group history for {}: {}", group_id, e),
+        }
     }
 }
 

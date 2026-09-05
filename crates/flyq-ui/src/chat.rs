@@ -139,6 +139,94 @@ pub fn render_chat_panel(
         .into_any_element()
 }
 
+/// Render a group chat panel.
+///
+/// Similar to the regular chat panel but with a simplified header (no
+/// knock/file/folder buttons) and a "#" prefix on the group name.
+pub fn render_group_chat_panel(
+    group_name: &str,
+    messages: &[ChatMsg],
+    input: &Entity<InputState>,
+    palette: Palette,
+    on_send: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    _on_send_file: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    // ── Header ──────────────────────────────────────────────────────────
+    let header = h_flex()
+        .w_full()
+        .px(px(16.0))
+        .py(px(12.0))
+        .items_center()
+        .border_b_1()
+        .border_color(palette.border)
+        .child(
+            div()
+                .text_base()
+                .font_weight(FontWeight::BOLD)
+                .text_color(palette.foreground)
+                .child(format!("# {}", group_name)),
+        )
+        .child(div().flex_1());
+
+    // ── Message list ────────────────────────────────────────────────────
+    let message_area = if messages.is_empty() {
+        div()
+            .flex_1()
+            .w_full()
+            .child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.muted_foreground)
+                            .child("群组还没有消息 — 发一条试试！"),
+                    ),
+            )
+            .into_any_element()
+    } else {
+        let mut bubbles: Vec<AnyElement> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            bubbles.push(message_bubble(msg, palette));
+        }
+        div()
+            .id("group-message-list")
+            .flex_1()
+            .w_full()
+            .overflow_y_scroll()
+            .px(px(16.0))
+            .py(px(12.0))
+            .child(v_flex().w_full().gap(px(10.0)).children(bubbles))
+            .into_any_element()
+    };
+
+    // ── Input row ───────────────────────────────────────────────────────
+    let input_row = h_flex()
+        .w_full()
+        .gap(px(8.0))
+        .px(px(16.0))
+        .py(px(12.0))
+        .items_center()
+        .border_t_1()
+        .border_color(palette.border)
+        .child(div().flex_1().child(Input::new(input)))
+        .child(
+            Button::new("group-send-btn")
+                .primary()
+                .label("Send")
+                .on_click(on_send),
+        );
+
+    v_flex()
+        .size_full()
+        .child(header)
+        .child(message_area)
+        .child(input_row)
+        .into_any_element()
+}
+
 /// Render a single message bubble, aligned right for outgoing messages.
 fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
     let (bg, fg) = if msg.outgoing {

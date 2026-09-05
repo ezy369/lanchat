@@ -12,6 +12,8 @@ pub struct StoredMessage {
     pub timestamp: i64,
     pub read: bool,
     pub packet_no: Option<u32>,
+    /// Group ID for group messages; `None` for 1:1 messages.
+    pub group_id: Option<String>,
 }
 
 /// A stored peer record.
@@ -122,4 +124,34 @@ pub struct MessageStats {
     pub first_timestamp: Option<i64>,
     /// Timestamp of the last message.
     pub last_timestamp: Option<i64>,
+}
+
+/// A chat group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Group {
+    /// Unique group ID (UUID).
+    pub id: String,
+    /// Display name of the group.
+    pub name: String,
+    /// Member addresses (`ip:port` strings).
+    pub members: Vec<String>,
+    /// Creation timestamp (Unix seconds).
+    pub created_at: i64,
+}
+
+/// A group summary for the sidebar list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupSummary {
+    /// Group ID.
+    pub group_id: String,
+    /// Group display name.
+    pub group_name: String,
+    /// Content of the last message.
+    pub last_message: String,
+    /// Timestamp of the last message.
+    pub last_timestamp: i64,
+    /// Number of unread messages.
+    pub unread_count: u32,
+    /// Number of members.
+    pub member_count: usize,
 }

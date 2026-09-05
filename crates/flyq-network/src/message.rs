@@ -8,7 +8,7 @@
 //! discovery service, allowing message sending from any task.
 
 use flyq_protocol::command::flags;
-use flyq_protocol::{Command, PacketBuilder, UserStatus};
+use flyq_protocol::{Command, GroupPayload, PacketBuilder, UserStatus};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -188,6 +188,41 @@ impl MessageSender {
             .sender(&self.identity.username, &self.identity.hostname)
             .packet_no(no)
             .command(Command::SendMsg)
+            .flag(cmd_flags)
+            .extra(&extra)
+            .build();
+
+        self.send_packet(&packet, to).await?;
+        Ok(no)
+    }
+
+    /// Send a group chat message to a single member.
+    ///
+    /// Uses the FeiQ GroupMsg command with MULTICASTOPT + UTF8OPT flags.
+    /// The extra field embeds the group name: `"{groupName}\0{messageText}"`.
+    ///
+    /// For group fan-out, call this once per member in the group.
+    pub async fn send_group_message(
+        &self,
+        to: SocketAddr,
+        group_name: &str,
+        content: &str,
+    ) -> Result<u32, MessageError> {
+        let no = self.next_packet_no();
+        let cmd_flags =
+            flags::IPMSG_MULTICASTOPT | flags::IPMSG_UTF8OPT | flags::IPMSG_SENDCHECKOPT;
+        let extra = GroupPayload::build_extra(group_name, content);
+
+        let builder = if self.identity.use_feiq_version {
+            PacketBuilder::new_feiq(&self.identity.mac_address, self.identity.feiq_level)
+        } else {
+            PacketBuilder::new()
+        };
+
+        let packet = builder
+            .sender(&self.identity.username, &self.identity.hostname)
+            .packet_no(no)
+            .command(Command::GroupMsg)
             .flag(cmd_flags)
             .extra(&extra)
             .build();

@@ -57,6 +57,13 @@ impl Database {
                     last_seen INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS groups (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    members TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+
                 -- FTS5 virtual table for full-text search on message content.
                 -- Uses unicode61 tokenizer which handles CJK characters by splitting
                 -- on each character boundary (suitable for Chinese/Japanese/Korean).
@@ -94,6 +101,17 @@ impl Database {
         let _ = self
             .conn
             .execute_batch("ALTER TABLE messages ADD COLUMN packet_no INTEGER;")
+            .await;
+
+        // M7: add group_id column for group chat messages.
+        // Group messages have group_id set and recipient = ''; 1:1 messages
+        // have group_id NULL and recipient = peer address.
+        let _ = self
+            .conn
+            .execute_batch(
+                "ALTER TABLE messages ADD COLUMN group_id TEXT;
+                 CREATE INDEX IF NOT EXISTS idx_messages_group_id ON messages(group_id);",
+            )
             .await;
 
         info!("Database migrations completed");

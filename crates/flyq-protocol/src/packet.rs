@@ -233,6 +233,34 @@ impl Default for PacketBuilder {
     }
 }
 
+/// Group message payload — encodes/decodes the extra field for GroupMsg.
+///
+/// Wire format: `"{groupName}\0{messageText}"`
+///
+/// The null byte (`\0`) separates the group name from the message body.
+/// If no null byte is present, the entire extra is treated as the message
+/// text with an empty group name (standard IPMsg multicast fallback).
+pub struct GroupPayload;
+
+impl GroupPayload {
+    /// Build the extra field for a group message.
+    pub fn build_extra(group_name: &str, text: &str) -> String {
+        format!("{}\0{}", group_name, text)
+    }
+
+    /// Parse the extra field from a group message.
+    ///
+    /// Returns `(group_name, message_text)`. If the extra contains no null
+    /// separator, returns `("", extra)` — the message is treated as group
+    /// text with no group name.
+    pub fn parse_extra(extra: &str) -> (&str, &str) {
+        match extra.find('\0') {
+            Some(pos) => (&extra[..pos], &extra[pos + 1..]),
+            None => ("", extra),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +553,91 @@ mod tests {
                 cmd, raw
             );
         }
+    }
+
+    // ─── M7: GroupMsg / Multicast ──────────────────────────────────────
+
+    #[test]
+    fn test_group_payload_build_and_parse() {
+        let extra = GroupPayload::build_extra("项目组", "大家好");
+        let (group, text) = GroupPayload::parse_extra(&extra);
+        assert_eq!(group, "项目组");
+        assert_eq!(text, "大家好");
+    }
+
+    #[test]
+    fn test_group_payload_no_separator() {
+        // Standard IPMsg multicast: no group name embedded
+        let (group, text) = GroupPayload::parse_extra("Hello everyone");
+        assert_eq!(group, "");
+        assert_eq!(text, "Hello everyone");
+    }
+
+    #[test]
+    fn test_group_payload_empty_text() {
+        let extra = GroupPayload::build_extra("TestGroup", "");
+        let (group, text) = GroupPayload::parse_extra(&extra);
+        assert_eq!(group, "TestGroup");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn test_multicast_flag_combination() {
+        // GroupMsg | MULTICASTOPT | UTF8OPT
+        let raw = Command::GroupMsg.to_raw()
+            | flags::IPMSG_MULTICASTOPT
+            | flags::IPMSG_UTF8OPT;
+        assert_eq!(raw, 0x00800823);
+        assert_eq!(Command::from_raw(raw), Command::GroupMsg);
+        assert!(extract_flags(raw) & flags::IPMSG_MULTICASTOPT != 0);
+        assert!(extract_flags(raw) & flags::IPMSG_UTF8OPT != 0);
+    }
+
+    #[test]
+    fn test_broadcast_flag_combination() {
+        // SendMsg | BROADCASTOPT
+        let raw = Command::SendMsg.to_raw() | flags::IPMSG_BROADCASTOPT;
+        assert_eq!(raw, 0x00000420);
+        assert_eq!(Command::from_raw(raw), Command::SendMsg);
+        assert!(extract_flags(raw) & flags::IPMSG_BROADCASTOPT != 0);
+    }
+
+    #[test]
+    fn test_group_message_packet_roundtrip() {
+        let extra = GroupPayload::build_extra("开发团队", "今天的会议取消了");
+        let packet = PacketBuilder::new()
+            .sender("Alice", "ALICE-PC")
+            .packet_no(999)
+            .command(Command::GroupMsg)
+            .flag(flags::IPMSG_MULTICASTOPT | flags::IPMSG_UTF8OPT)
+            .extra(&extra)
+            .build();
+
+        let parsed = PacketParser::parse(&packet).unwrap();
+        assert_eq!(parsed.command, Command::GroupMsg);
+        assert!(parsed.has_flag(flags::IPMSG_MULTICASTOPT));
+        assert!(parsed.has_flag(flags::IPMSG_UTF8OPT));
+
+        let extra_str = parsed.extra.as_deref().unwrap();
+        let (group, text) = GroupPayload::parse_extra(extra_str);
+        assert_eq!(group, "开发团队");
+        assert_eq!(text, "今天的会议取消了");
+    }
+
+    #[test]
+    fn test_sendmsg_with_multicast_flag() {
+        // Standard IPMsg group: SendMsg + MULTICASTOPT (no group name in extra)
+        let raw = PacketBuilder::new()
+            .sender("Bob", "BOB-PC")
+            .packet_no(500)
+            .command(Command::SendMsg)
+            .flag(flags::IPMSG_MULTICASTOPT | flags::IPMSG_UTF8OPT)
+            .extra("Hey team")
+            .build();
+
+        let parsed = PacketParser::parse(&raw).unwrap();
+        assert_eq!(parsed.command, Command::SendMsg);
+        assert!(parsed.has_flag(flags::IPMSG_MULTICASTOPT));
+        assert_eq!(parsed.extra.as_deref(), Some("Hey team"));
     }
 }

@@ -1,6 +1,6 @@
 //! Integration tests for flyq-storage.
 
-use flyq_storage::{Database, Page, StoredMessage, StoredPeer};
+use flyq_storage::{Database, Group, Page, StoredMessage, StoredPeer};
 use uuid::Uuid;
 
 /// Create an in-memory database for testing.
@@ -20,6 +20,7 @@ fn make_msg(sender: &str, recipient: &str, content: &str, timestamp: i64, read: 
         timestamp,
         read,
         packet_no: None,
+        group_id: None,
     }
 }
 
@@ -566,4 +567,175 @@ async fn test_delete_message_by_packet_no_not_found() {
         .await
         .unwrap();
     assert!(!deleted, "wrong sender address");
+}
+
+// ─── M7: Group Management & Group Messages ─────────────────────────────────
+
+fn make_group(id: &str, name: &str, members: Vec<&str>) -> Group {
+    Group {
+        id: id.to_string(),
+        name: name.to_string(),
+        members: members.into_iter().map(|s| s.to_string()).collect(),
+        created_at: 1000,
+    }
+}
+
+fn make_group_msg(sender: &str, group_id: &str, content: &str, timestamp: i64) -> StoredMessage {
+    StoredMessage {
+        id: Uuid::new_v4().to_string(),
+        sender: sender.to_string(),
+        recipient: String::new(),
+        content: content.to_string(),
+        timestamp,
+        read: false,
+        packet_no: None,
+        group_id: Some(group_id.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn test_group_crud() {
+    let db = setup_db().await;
+
+    let group = make_group("g1", "开发团队", vec!["10.0.0.1:2425", "10.0.0.2:2425", "10.0.0.3:2425"]);
+    db.insert_group(&group).await.unwrap();
+
+    // Get all groups.
+    let groups = db.get_groups().await.unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].name, "开发团队");
+    assert_eq!(groups[0].members.len(), 3);
+
+    // Find by name.
+    let found = db.get_group_by_name("开发团队").await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().id, "g1");
+
+    // Find non-existent name.
+    let not_found = db.get_group_by_name("不存在的群").await.unwrap();
+    assert!(not_found.is_none());
+
+    // Update members.
+    db.update_group_members("g1", &["10.0.0.1:2425".to_string(), "10.0.0.4:2425".to_string()])
+        .await
+        .unwrap();
+    let groups = db.get_groups().await.unwrap();
+    assert_eq!(groups[0].members.len(), 2);
+
+    // Delete.
+    let deleted = db.delete_group("g1").await.unwrap();
+    assert!(deleted);
+    let groups = db.get_groups().await.unwrap();
+    assert!(groups.is_empty());
+}
+
+#[tokio::test]
+async fn test_group_messages_paged() {
+    let db = setup_db().await;
+
+    let group = make_group("g1", "测试群", vec!["a", "b", "c"]);
+    db.insert_group(&group).await.unwrap();
+
+    // Insert 5 group messages from different senders.
+    for i in 0..5 {
+        let sender = if i % 2 == 0 { "a" } else { "b" };
+        let msg = make_group_msg(sender, "g1", &format!("群消息 {}", i), 2000 + i as i64);
+        db.insert_message(&msg).await.unwrap();
+    }
+
+    // Also insert a 1:1 message to verify it doesn't leak into group results.
+    let direct = make_msg("a", "b", "私聊消息", 2500, false);
+    db.insert_message(&direct).await.unwrap();
+
+    let page = db.get_group_messages_paged("g1", Page::new(10, 0)).await.unwrap();
+    assert_eq!(page.total, 5);
+    assert_eq!(page.items.len(), 5);
+    // Should be in chronological order.
+    assert!(page.items[0].timestamp <= page.items[1].timestamp);
+
+    // Pagination: first page of 3.
+    let page1 = db.get_group_messages_paged("g1", Page::new(3, 0)).await.unwrap();
+    assert_eq!(page1.items.len(), 3);
+    assert!(page1.has_more());
+
+    // Second page.
+    let page2 = db.get_group_messages_paged("g1", Page::new(3, 3)).await.unwrap();
+    assert_eq!(page2.items.len(), 2);
+    assert!(!page2.has_more());
+}
+
+#[tokio::test]
+async fn test_group_conversation_read() {
+    let db = setup_db().await;
+
+    let msg1 = make_group_msg("a", "g1", "消息1", 3000);
+    let msg2 = make_group_msg("b", "g1", "消息2", 3001);
+    db.insert_message(&msg1).await.unwrap();
+    db.insert_message(&msg2).await.unwrap();
+
+    // Both should be unread.
+    let affected = db.mark_group_conversation_read("g1").await.unwrap();
+    assert_eq!(affected, 2);
+
+    // Mark again — no change.
+    let affected = db.mark_group_conversation_read("g1").await.unwrap();
+    assert_eq!(affected, 0);
+}
+
+#[tokio::test]
+async fn test_group_summaries() {
+    let db = setup_db().await;
+
+    let g1 = make_group("g1", "群A", vec!["a", "b"]);
+    let g2 = make_group("g2", "群B", vec!["a", "c", "d"]);
+    db.insert_group(&g1).await.unwrap();
+    db.insert_group(&g2).await.unwrap();
+
+    // Group 1: 2 messages.
+    let msg1 = make_group_msg("a", "g1", "群A消息1", 4000);
+    let msg2 = make_group_msg("b", "g1", "群A消息2", 4001);
+    db.insert_message(&msg1).await.unwrap();
+    db.insert_message(&msg2).await.unwrap();
+
+    // Group 2: 1 message.
+    let msg3 = make_group_msg("c", "g2", "群B消息1", 4002);
+    db.insert_message(&msg3).await.unwrap();
+
+    let summaries = db.get_group_summaries().await.unwrap();
+    assert_eq!(summaries.len(), 2);
+
+    // Most recent first.
+    assert_eq!(summaries[0].group_name, "群B");
+    assert_eq!(summaries[0].last_message, "群B消息1");
+    assert_eq!(summaries[0].unread_count, 1);
+    assert_eq!(summaries[0].member_count, 3);
+
+    assert_eq!(summaries[1].group_name, "群A");
+    assert_eq!(summaries[1].unread_count, 2);
+    assert_eq!(summaries[1].member_count, 2);
+}
+
+#[tokio::test]
+async fn test_group_id_does_not_affect_direct_messages() {
+    let db = setup_db().await;
+
+    // Insert a direct message (no group_id).
+    let direct = make_msg("a", "b", "私聊", 5000, false);
+    db.insert_message(&direct).await.unwrap();
+
+    // Insert a group message.
+    let group_msg = make_group_msg("a", "g1", "群消息", 5001);
+    db.insert_message(&group_msg).await.unwrap();
+
+    // 1:1 conversation should only have the direct message.
+    let messages = db.get_messages("a", "b", 10).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "私聊");
+    assert!(messages[0].group_id.is_none());
+
+    // Group conversation should only have the group message.
+    let group_msgs = db.get_group_messages_paged("g1", Page::new(10, 0)).await.unwrap();
+    assert_eq!(group_msgs.total, 1);
+    assert_eq!(group_msgs.items[0].content, "群消息");
+    assert_eq!(group_msgs.items[0].group_id.as_deref(), Some("g1"));
 }

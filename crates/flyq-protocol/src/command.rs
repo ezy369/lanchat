@@ -92,6 +92,10 @@ pub mod flags {
     pub const IPMSG_ABSENCEOPT: u32 = 0x00000100;
     /// Server/broadcast mode.
     pub const IPMSG_SERVEROPT: u32 = 0x00000200;
+    /// Broadcast message (sent to all users on subnet).
+    pub const IPMSG_BROADCASTOPT: u32 = 0x00000400;
+    /// Multicast message (sent to a group of users).
+    pub const IPMSG_MULTICASTOPT: u32 = 0x00000800;
     /// FeiQ: request delivery confirmation (same bit as ABSENCEOPT).
     pub const IPMSG_SENDCHECKOPT: u32 = 0x00000100;
     /// Dial-up mode.

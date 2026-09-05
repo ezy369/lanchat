@@ -2,7 +2,8 @@
 
 use crate::db::{Database, DbError};
 use crate::models::{
-    ConversationSummary, MessageStats, Page, PagedResult, SearchResult, StoredMessage, StoredPeer,
+    ConversationSummary, Group, GroupSummary, MessageStats, Page, PagedResult, SearchResult,
+    StoredMessage, StoredPeer,
 };
 
 impl Database {
@@ -13,8 +14,8 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "INSERT INTO messages (id, sender, recipient, content, timestamp, read, packet_no)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO messages (id, sender, recipient, content, timestamp, read, packet_no, group_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )
             .await?;
         let pkt: Option<i64> = msg.packet_no.map(|n| n as i64);
@@ -26,6 +27,7 @@ impl Database {
             msg.timestamp,
             msg.read as i64,
             pkt,
+            msg.group_id.as_deref(),
         ))
         .await?;
         Ok(())
@@ -113,7 +115,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
                  FROM messages
                  WHERE (sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1)
                  ORDER BY timestamp DESC
@@ -174,7 +176,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
                  FROM messages
                  WHERE sender = ?1 OR recipient = ?1
                  ORDER BY timestamp DESC
@@ -269,6 +271,7 @@ impl Database {
                     timestamp,
                     read: read != 0,
                     packet_no: None,
+                    group_id: None,
                 },
                 rank,
                 snippet,
@@ -351,6 +354,7 @@ impl Database {
                     timestamp,
                     read: read != 0,
                     packet_no: None,
+                    group_id: None,
                 },
                 rank,
                 snippet,
@@ -511,7 +515,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
                  FROM messages
                  WHERE ((sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1))
                    AND timestamp >= ?3 AND timestamp <= ?4
@@ -617,6 +621,217 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    // ─── Group Management ────────────────────────────────────────────────────
+
+    /// Insert a new group. Members are stored as a JSON array string.
+    pub async fn insert_group(&self, group: &Group) -> Result<(), DbError> {
+        let members_json = serde_json::to_string(&group.members)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "INSERT INTO groups (id, name, members, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .await?;
+        stmt.execute((
+            group.id.as_str(),
+            group.name.as_str(),
+            members_json.as_str(),
+            group.created_at,
+        ))
+        .await?;
+        Ok(())
+    }
+
+    /// Get all groups ordered by creation time (newest first).
+    pub async fn get_groups(&self) -> Result<Vec<Group>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, members, created_at FROM groups ORDER BY created_at DESC")
+            .await?;
+
+        let mut rows = stmt.query(()).await?;
+        let mut groups = Vec::new();
+
+        while let Some(row) = rows.next().await? {
+            let members_json: String = row.get(2)?;
+            let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
+            groups.push(Group {
+                id: row.get::<String>(0)?,
+                name: row.get::<String>(1)?,
+                members,
+                created_at: row.get::<i64>(3)?,
+            });
+        }
+
+        Ok(groups)
+    }
+
+    /// Find a group by its display name.
+    pub async fn get_group_by_name(&self, name: &str) -> Result<Option<Group>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, members, created_at FROM groups WHERE name = ?1")
+            .await?;
+
+        let mut rows = stmt.query([name]).await?;
+        match rows.next().await? {
+            Some(row) => {
+                let members_json: String = row.get(2)?;
+                let members: Vec<String> = serde_json::from_str(&members_json).unwrap_or_default();
+                Ok(Some(Group {
+                    id: row.get::<String>(0)?,
+                    name: row.get::<String>(1)?,
+                    members,
+                    created_at: row.get::<i64>(3)?,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Update a group's member list.
+    pub async fn update_group_members(
+        &self,
+        group_id: &str,
+        members: &[String],
+    ) -> Result<(), DbError> {
+        let members_json = serde_json::to_string(members)
+            .map_err(|e| DbError::Migration(e.to_string()))?;
+        self.conn
+            .execute(
+                "UPDATE groups SET members = ?1 WHERE id = ?2",
+                (members_json.as_str(), group_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a group by ID. Does not delete associated messages.
+    pub async fn delete_group(&self, group_id: &str) -> Result<bool, DbError> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM groups WHERE id = ?1", [group_id])
+            .await?;
+        Ok(affected > 0)
+    }
+
+    // ─── Group Messages ──────────────────────────────────────────────────────
+
+    /// Get messages in a group conversation with pagination.
+    pub async fn get_group_messages_paged(
+        &self,
+        group_id: &str,
+        page: Page,
+    ) -> Result<PagedResult<StoredMessage>, DbError> {
+        let mut count_stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM messages WHERE group_id = ?1")
+            .await?;
+        let mut count_rows = count_stmt.query([group_id]).await?;
+        let total = match count_rows.next().await? {
+            Some(row) => row.get::<i64>(0)? as u64,
+            None => 0,
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
+                 FROM messages
+                 WHERE group_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2 OFFSET ?3",
+            )
+            .await?;
+
+        let mut rows = stmt.query((group_id, page.limit, page.offset)).await?;
+        let mut messages = Vec::new();
+
+        while let Some(row) = rows.next().await? {
+            messages.push(row_to_message(&row)?);
+        }
+
+        messages.reverse();
+
+        Ok(PagedResult {
+            items: messages,
+            total,
+            offset: page.offset,
+            limit: page.limit,
+        })
+    }
+
+    /// Mark all messages in a group as read.
+    pub async fn mark_group_conversation_read(
+        &self,
+        group_id: &str,
+    ) -> Result<u64, DbError> {
+        let affected = self
+            .conn
+            .execute(
+                "UPDATE messages SET read = 1 WHERE group_id = ?1 AND read = 0",
+                [group_id],
+            )
+            .await?;
+        Ok(affected)
+    }
+
+    /// Get group summaries for the sidebar (last message + unread count per group).
+    pub async fn get_group_summaries(&self) -> Result<Vec<GroupSummary>, DbError> {
+        let groups = self.get_groups().await?;
+        let mut summaries = Vec::new();
+
+        for group in &groups {
+            // Get last message in this group.
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT content, timestamp FROM messages
+                     WHERE group_id = ?1
+                     ORDER BY timestamp DESC LIMIT 1",
+                )
+                .await?;
+            let mut rows = stmt.query([group.id.as_str()]).await?;
+
+            let (last_message, last_timestamp) = match rows.next().await? {
+                Some(row) => (
+                    row.get::<String>(0).unwrap_or_default(),
+                    row.get::<i64>(1).unwrap_or(0),
+                ),
+                None => continue, // skip groups with no messages
+            };
+
+            // Count unread.
+            let mut unread_stmt = self
+                .conn
+                .prepare(
+                    "SELECT COUNT(*) FROM messages WHERE group_id = ?1 AND read = 0",
+                )
+                .await?;
+            let mut unread_rows = unread_stmt.query([group.id.as_str()]).await?;
+            let unread_count: u32 = match unread_rows.next().await? {
+                Some(r) => r.get::<i64>(0)? as u32,
+                None => 0,
+            };
+
+            summaries.push(GroupSummary {
+                group_id: group.id.clone(),
+                group_name: group.name.clone(),
+                last_message,
+                last_timestamp,
+                unread_count,
+                member_count: group.members.len(),
+            });
+        }
+
+        // Sort by most recent activity.
+        summaries.sort_by(|a, b| b.last_timestamp.cmp(&a.last_timestamp));
+
+        Ok(summaries)
+    }
 }
 
 /// Helper to convert a libsql Row into a StoredMessage.
@@ -629,5 +844,6 @@ fn row_to_message(row: &libsql::Row) -> Result<StoredMessage, DbError> {
         timestamp: row.get::<i64>(4)?,
         read: row.get::<i64>(5)? != 0,
         packet_no: row.get::<Option<i64>>(6)?.map(|n| n as u32),
+        group_id: row.get::<Option<String>>(7)?,
     })
 }

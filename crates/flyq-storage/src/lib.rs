@@ -12,5 +12,6 @@ pub mod queries;
 
 pub use db::{Database, DbError};
 pub use models::{
-    ConversationSummary, MessageStats, Page, PagedResult, SearchResult, StoredMessage, StoredPeer,
+    ConversationSummary, Group, GroupSummary, MessageStats, Page, PagedResult, SearchResult,
+    StoredMessage, StoredPeer,
 };

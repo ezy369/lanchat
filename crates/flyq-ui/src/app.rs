@@ -192,6 +192,14 @@ pub struct LanChatApp {
     settings_download: Entity<InputState>,
     /// Settings form: network port field.
     settings_port: Entity<InputState>,
+    /// Known chat groups.
+    groups: Vec<flyq_core::Group>,
+    /// Group message history keyed by group_id.
+    group_conversations: HashMap<String, Vec<ChatMsg>>,
+    /// Currently open group (mutually exclusive with peer `selected`).
+    selected_group: Option<String>,
+    /// Groups whose history has been loaded from the database.
+    group_history_loaded: HashSet<String>,
 }
 
 impl LanChatApp {
@@ -267,6 +275,10 @@ impl LanChatApp {
             settings_nickname,
             settings_download,
             settings_port,
+            groups: Vec::new(),
+            group_conversations: HashMap::new(),
+            selected_group: None,
+            group_history_loaded: HashSet::new(),
         };
 
         // Consume UI events on GPUI's executor. `tokio::sync::mpsc::recv` is
@@ -501,6 +513,65 @@ impl LanChatApp {
                     msgs.retain(|m| m.packet_no != Some(packet_no));
                 }
             }
+            // M7: group events.
+            UiEvent::GroupMessageReceived {
+                group_id,
+                group_name: _,
+                sender,
+                sender_addr: _,
+                content,
+                timestamp,
+                packet_no,
+            } => {
+                let outgoing = sender == "You";
+                let bubble = ChatMsg {
+                    id: format!("{}-{}", group_id, timestamp),
+                    text: content,
+                    timestamp,
+                    outgoing,
+                    sender_name: sender,
+                    packet_no: Some(packet_no),
+                    status: if outgoing {
+                        MsgStatus::Sent
+                    } else {
+                        MsgStatus::Delivered
+                    },
+                };
+                self.group_conversations
+                    .entry(group_id.clone())
+                    .or_default()
+                    .push(bubble);
+
+                // Auto-select the group if no conversation is currently open.
+                if self.selected.is_none() && self.selected_group.is_none() {
+                    self.selected_group = Some(group_id);
+                }
+            }
+            UiEvent::GroupCreated {
+                group_id,
+                group_name,
+                members,
+            } => {
+                // Add to our groups list if not already known.
+                if !self.groups.iter().any(|g| g.id == group_id) {
+                    self.groups.push(flyq_core::Group {
+                        id: group_id,
+                        name: group_name,
+                        members,
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    });
+                }
+            }
+            UiEvent::GroupDeleted { group_id } => {
+                self.groups.retain(|g| g.id != group_id);
+                self.group_conversations.remove(&group_id);
+                if self.selected_group.as_deref() == Some(&group_id) {
+                    self.selected_group = None;
+                }
+            }
         }
         cx.notify();
     }
@@ -515,11 +586,21 @@ impl LanChatApp {
     pub fn select_peer(&mut self, addr: SocketAddr, cx: &mut Context<Self>) {
         if self.selected != Some(addr) {
             self.selected = Some(addr);
+            self.selected_group = None;
         }
         // Lazily load persisted history the first time a conversation is opened.
         self.ensure_history(addr);
         // Opening a conversation acknowledges any unread incoming messages.
         self.acknowledge_reads(addr);
+        cx.notify();
+    }
+
+    /// Select a group to open its conversation.
+    pub fn select_group(&mut self, group_id: String, cx: &mut Context<Self>) {
+        if self.selected_group.as_deref() != Some(&group_id) {
+            self.selected = None;
+            self.selected_group = Some(group_id);
+        }
         cx.notify();
     }
 
@@ -593,26 +674,57 @@ impl LanChatApp {
             .unwrap_or_else(|| addr.to_string())
     }
 
-    /// Read the input, clear it, and send the message to the selected peer.
+    /// Read the input, clear it, and send the message to the selected peer or group.
     fn send_current_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
-        let Some(to) = self.selected else {
-            return;
-        };
 
         // Clear the input immediately for a responsive feel.
         self.input.update(cx, |input, cx| input.set_value("", window, cx));
 
-        let handler = self.handler.clone();
-        self.rt.spawn(async move {
-            if let Err(e) = handler.send_chat_message(to, &text, true).await {
-                warn!("Failed to send message to {}: {}", to, e);
-            }
-        });
+        if let Some(to) = self.selected {
+            // Direct message to a peer.
+            let handler = self.handler.clone();
+            self.rt.spawn(async move {
+                if let Err(e) = handler.send_chat_message(to, &text, true).await {
+                    warn!("Failed to send message to {}: {}", to, e);
+                }
+            });
+        } else if let Some(ref group_id) = self.selected_group {
+            // Group message — fan-out to all members.
+            let gid = group_id.clone();
+            let local_name = self.local_name.clone();
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // Push a local bubble immediately.
+            self.group_conversations
+                .entry(gid.clone())
+                .or_default()
+                .push(ChatMsg {
+                    id: format!("{}-out-{}", gid, timestamp),
+                    text: text.clone(),
+                    timestamp,
+                    outgoing: true,
+                    sender_name: local_name,
+                    packet_no: None,
+                    status: MsgStatus::Sending,
+                });
+            cx.notify();
+
+            let handler = self.handler.clone();
+            self.rt.spawn(async move {
+                match handler.send_group_chat_message(&gid, &text).await {
+                    Ok(_) => {}
+                    Err(e) => warn!("Failed to send group message to {}: {}", gid, e),
+                }
+            });
+        }
     }
 
     /// Accept a pending incoming file offer: remove the prompt and start the
@@ -797,6 +909,32 @@ impl Render for LanChatApp {
             );
             rows.push(row);
         }
+
+        // ── Sidebar group rows ───────────────────────────────────────────
+        let selected_group = self.selected_group.clone();
+        let mut group_rows: Vec<AnyElement> = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let gid = group.id.clone();
+            let gid_for_row = gid.clone();
+            let gname = group.name.clone();
+            let member_count = group.members.len();
+            let is_selected = selected_group.as_deref() == Some(&gid);
+            let grp_this = this.clone();
+            let grp_input = input_entity.clone();
+            let row = sidebar::group_row(
+                &gid,
+                &gname,
+                member_count,
+                is_selected,
+                palette,
+                move |_, window, cx| {
+                    grp_this.update(cx, |app, cx| app.select_group(gid_for_row.clone(), cx));
+                    grp_input.update(cx, |i, cx| i.focus(window, cx));
+                },
+            );
+            group_rows.push(row);
+        }
+
         let settings_this = this.clone();
         let status_this = this.clone();
         let sidebar_el = sidebar::render_sidebar(
@@ -804,6 +942,7 @@ impl Render for LanChatApp {
             local_status,
             peer_count,
             rows,
+            group_rows,
             palette,
             move |_, _, cx| {
                 settings_this.update(cx, |app, cx| app.open_settings(cx));
@@ -814,96 +953,121 @@ impl Render for LanChatApp {
         );
 
         // ── Chat panel ───────────────────────────────────────────────────
-        let chat_el = match selected {
-            Some(addr) => {
-                let name = self.peer_name(&addr);
-                let messages = self.conversations.get(&addr).cloned().unwrap_or_default();
-                let typing = self.typing.get(&addr).cloned();
-                let send_this = this.clone();
-                let send_input = input_entity.clone();
-                let send_handler = handler.clone();
-                let send_rt = rt.clone();
-                let knock_handler = handler.clone();
-                let knock_rt = rt.clone();
-                let file_handler = handler.clone();
-                let file_rt = rt.clone();
-                let folder_handler = handler.clone();
-                let folder_rt = rt.clone();
-                chat::render_chat_panel(
-                    Some(&name),
-                    &messages,
-                    typing.as_deref(),
-                    &self.input,
-                    palette,
-                    move |_, window, cx| {
-                        let text = send_input.read(cx).value().to_string();
-                        let text = text.trim().to_string();
-                        if text.is_empty() {
-                            return;
+        let chat_el = if let Some(addr) = selected {
+            let name = self.peer_name(&addr);
+            let messages = self.conversations.get(&addr).cloned().unwrap_or_default();
+            let typing = self.typing.get(&addr).cloned();
+            let send_this = this.clone();
+            let send_input = input_entity.clone();
+            let send_handler = handler.clone();
+            let send_rt = rt.clone();
+            let knock_handler = handler.clone();
+            let knock_rt = rt.clone();
+            let file_handler = handler.clone();
+            let file_rt = rt.clone();
+            let folder_handler = handler.clone();
+            let folder_rt = rt.clone();
+            chat::render_chat_panel(
+                Some(&name),
+                &messages,
+                typing.as_deref(),
+                &self.input,
+                palette,
+                move |_, window, cx| {
+                    let text = send_input.read(cx).value().to_string();
+                    let text = text.trim().to_string();
+                    if text.is_empty() {
+                        return;
+                    }
+                    send_input.update(cx, |i, cx| i.set_value("", window, cx));
+                    let handler = send_handler.clone();
+                    send_rt.spawn(async move {
+                        if let Err(e) = handler.send_chat_message(addr, &text, true).await {
+                            warn!("Failed to send message to {}: {}", addr, e);
                         }
-                        send_input.update(cx, |i, cx| i.set_value("", window, cx));
-                        let handler = send_handler.clone();
-                        send_rt.spawn(async move {
-                            if let Err(e) = handler.send_chat_message(addr, &text, true).await {
-                                warn!("Failed to send message to {}: {}", addr, e);
-                            }
-                        });
-                        // Keep a reference to the entity alive for future use.
-                        let _ = &send_this;
-                    },
-                    move |_, _, _| {
-                        let handler = knock_handler.clone();
-                        knock_rt.spawn(async move {
-                            if let Err(e) = handler.send_knock(addr).await {
-                                warn!("Failed to send knock to {}: {}", addr, e);
-                            }
-                        });
-                    },
-                    move |_, _, cx| {
-                        // Native multi-file picker (runs on the platform thread).
-                        let rx = cx.prompt_for_paths(PathPromptOptions {
-                            files: true,
-                            directories: false,
-                            multiple: true,
-                            prompt: None,
-                        });
-                        let handler = file_handler.clone();
-                        file_rt.spawn(async move {
-                            match rx.await {
-                                Ok(Ok(Some(paths))) if !paths.is_empty() => {
-                                    if let Err(e) = handler.send_files(addr, "", &paths).await {
-                                        warn!("Failed to send files to {}: {}", addr, e);
-                                    }
+                    });
+                    // Keep a reference to the entity alive for future use.
+                    let _ = &send_this;
+                },
+                move |_, _, _| {
+                    let handler = knock_handler.clone();
+                    knock_rt.spawn(async move {
+                        if let Err(e) = handler.send_knock(addr).await {
+                            warn!("Failed to send knock to {}: {}", addr, e);
+                        }
+                    });
+                },
+                move |_, _, cx| {
+                    // Native multi-file picker (runs on the platform thread).
+                    let rx = cx.prompt_for_paths(PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: true,
+                        prompt: None,
+                    });
+                    let handler = file_handler.clone();
+                    file_rt.spawn(async move {
+                        match rx.await {
+                            Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                if let Err(e) = handler.send_files(addr, "", &paths).await {
+                                    warn!("Failed to send files to {}: {}", addr, e);
                                 }
-                                Ok(Err(e)) => warn!("File picker error: {}", e),
-                                _ => {}
                             }
-                        });
-                    },
-                    move |_, _, cx| {
-                        // Native directory picker (folder transfer).
-                        let rx = cx.prompt_for_paths(PathPromptOptions {
-                            files: false,
-                            directories: true,
-                            multiple: true,
-                            prompt: None,
-                        });
-                        let handler = folder_handler.clone();
-                        folder_rt.spawn(async move {
-                            match rx.await {
-                                Ok(Ok(Some(paths))) if !paths.is_empty() => {
-                                    if let Err(e) = handler.send_files(addr, "", &paths).await {
-                                        warn!("Failed to send folder to {}: {}", addr, e);
-                                    }
+                            Ok(Err(e)) => warn!("File picker error: {}", e),
+                            _ => {}
+                        }
+                    });
+                },
+                move |_, _, cx| {
+                    // Native directory picker (folder transfer).
+                    let rx = cx.prompt_for_paths(PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: true,
+                        prompt: None,
+                    });
+                    let handler = folder_handler.clone();
+                    folder_rt.spawn(async move {
+                        match rx.await {
+                            Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                if let Err(e) = handler.send_files(addr, "", &paths).await {
+                                    warn!("Failed to send folder to {}: {}", addr, e);
                                 }
-                                Ok(Err(e)) => warn!("Folder picker error: {}", e),
-                                _ => {}
                             }
-                        });
-                    },
-                )
-            }
-            None => chat::render_chat_panel(
+                            Ok(Err(e)) => warn!("Folder picker error: {}", e),
+                            _ => {}
+                        }
+                    });
+                },
+            )
+        } else if let Some(ref gid) = selected_group {
+            // Group chat panel — shows group messages with a simplified header.
+            let group_name = self
+                .groups
+                .iter()
+                .find(|g| &g.id == gid)
+                .map(|g| g.name.clone())
+                .unwrap_or_else(|| gid.clone());
+            let messages = self
+                .group_conversations
+                .get(gid)
+                .cloned()
+                .unwrap_or_default();
+            let grp_send_this = this.clone();
+            let grp_send_input = input_entity.clone();
+            chat::render_group_chat_panel(
+                &group_name,
+                &messages,
+                &self.input,
+                palette,
+                move |_, window, cx| {
+                    grp_send_this.update(cx, |app, cx| app.send_current_message(window, cx));
+                    let _ = &grp_send_input;
+                },
+                |_, _, _| {},
+            )
+        } else {
+            chat::render_chat_panel(
                 None,
                 &[],
                 None,
@@ -913,7 +1077,7 @@ impl Render for LanChatApp {
                 |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},
-            ),
+            )
         };
 
         let drop_handler = handler.clone();

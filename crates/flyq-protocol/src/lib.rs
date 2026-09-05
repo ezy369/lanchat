@@ -30,7 +30,7 @@ pub mod types;
 
 pub use command::{Command, compose_command, extract_flags, flags};
 pub use feiq::{EmojiCode, FeiqVersion, FileAttachmentInfo, FileTransferRequest, RichText};
-pub use packet::{Packet, PacketBuilder, PacketParser};
+pub use packet::{GroupPayload, Packet, PacketBuilder, PacketParser};
 pub use types::*;
 
 /// IPMsg protocol version.
