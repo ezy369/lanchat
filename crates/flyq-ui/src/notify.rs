@@ -13,6 +13,7 @@
 //! silently disappear).
 
 use notify_rust::Notification;
+use rust_i18n::t;
 use tokio::runtime::Handle;
 
 /// Source name shown on the notification (used on Linux/macOS; Windows toasts
@@ -39,8 +40,8 @@ fn preview(body: &str, max_chars: usize) -> String {
 /// The body text for a "files offered" notification, worded for one vs. many.
 fn offer_body(count: usize) -> String {
     match count {
-        1 => "对方发来 1 个文件，等待接收".to_string(),
-        n => format!("对方发来 {} 个文件，等待接收", n),
+        1 => t!("notify.file_offer_one").to_string(),
+        n => t!("notify.file_offer_many", count = n).to_string(),
     }
 }
 
@@ -62,21 +63,21 @@ fn push(rt: &Handle, summary: String, body: String) {
 pub fn message(rt: &Handle, sender: &str, content: &str) {
     push(
         rt,
-        format!("{} 发来消息", sender),
+        t!("notify.message_from", name = sender).to_string(),
         preview(content, PREVIEW_CHARS),
     );
 }
 
 /// Notify that `name` offered `count` file(s)/folder(s) for download.
 pub fn file_offer(rt: &Handle, name: &str, count: usize) {
-    push(rt, format!("{} 发来文件", name), offer_body(count));
+    push(rt, t!("notify.file_from", name = name).to_string(), offer_body(count));
 }
 
 /// Notify that a file finished downloading.
 pub fn file_complete(rt: &Handle, filename: &str) {
     push(
         rt,
-        "文件接收完成".to_string(),
+        t!("notify.file_complete").to_string(),
         preview(filename, PREVIEW_CHARS),
     );
 }
@@ -120,12 +121,12 @@ mod tests {
 
     #[test]
     fn offer_body_is_singular_for_one() {
-        assert_eq!(offer_body(1), "对方发来 1 个文件，等待接收");
+        assert_eq!(offer_body(1), t!("notify.file_offer_one").to_string());
     }
 
     #[test]
     fn offer_body_is_plural_for_many() {
-        assert_eq!(offer_body(3), "对方发来 3 个文件，等待接收");
+        assert_eq!(offer_body(3), t!("notify.file_offer_many", count = 3).to_string());
     }
 
     /// Manual verification: actually raises a real OS notification. Ignored by

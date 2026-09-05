@@ -1,0 +1,71 @@
+app:
+  input_placeholder: "输入消息，回车发送…"
+  knock_banner: "%{name} 抖了抖你"
+  image_placeholder: "[图片]"
+  select_image: "选择图片"
+  file_offer: "%{name} 想发送%{file_type}给你"
+  file_offer_file: "文件"
+  file_offer_folder: "文件夹"
+  reject: "拒绝"
+  accept: "接收"
+  saved: "已保存"
+  open_folder: "打开文件夹"
+  transfer_failed: "传输失败"
+  nickname_placeholder: "昵称"
+  download_dir_placeholder: "下载目录"
+  port_placeholder: "端口"
+
+chat:
+  send_file: "发送文件"
+  send_folder: "发送文件夹"
+  send_image: "发送图片"
+  screenshot: "截图"
+  knock: "抖屏"
+  empty_conversation: "还没有消息 — 打个招呼吧！"
+  typing: "%{name} 正在输入…"
+  send: "发送"
+  group_empty: "群组还没有消息 — 发一条试试！"
+  you: "你"
+  image_placeholder: "[图片]"
+  select_peer: "选择联系人开始聊天"
+
+sidebar:
+  title: "LanChat"
+  online_count: "%{name} · %{count} 人在线"
+  settings: "设置"
+  my_status: "我的状态 · %{status}"
+  switch: "切换"
+  searching: "正在搜索局域网中的联系人…"
+  groups: "群组"
+  contacts: "联系人"
+  typing: "正在输入…"
+  members: "%{count} 成员"
+
+settings:
+  title: "设置"
+  nickname: "昵称"
+  download_dir: "下载目录"
+  port: "端口"
+  language: "语言"
+  help_text: "下载目录立即生效；昵称与端口将在重启 LanChat 后对网络生效。"
+  cancel: "取消"
+  save: "保存"
+  sound_enabled: "消息提醒音"
+
+notify:
+  app_name: "LanChat"
+  file_offer_one: "对方发来 1 个文件，等待接收"
+  file_offer_many: "对方发来 %{count} 个文件，等待接收"
+  message_from: "%{name} 发来消息"
+  file_from: "%{name} 发来文件"
+  file_complete: "文件接收完成"
+
+status:
+  online: "在线"
+  away: "离开"
+  busy: "忙碌"
+  offline: "离线"
+
+tray:
+  show_window: "显示主窗口"
+  quit: "退出"

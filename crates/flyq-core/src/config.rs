@@ -16,6 +16,12 @@ use std::path::{Path, PathBuf};
 /// Default IPMsg/FeiQ port (UDP discovery + TCP file transfer).
 pub const DEFAULT_PORT: u16 = 2425;
 
+/// Supported UI locales.
+pub const SUPPORTED_LOCALES: &[&str] = &["zh-CN", "en"];
+
+/// Default UI locale.
+pub const DEFAULT_LOCALE: &str = "zh-CN";
+
 /// User-adjustable application settings, persisted as TOML.
 ///
 /// `#[serde(default)]` makes the format forward/backward compatible: a config
@@ -32,6 +38,10 @@ pub struct AppConfig {
     pub port: u16,
     /// Our presence status, broadcast to peers and restored on next launch.
     pub status: UserStatus,
+    /// UI locale identifier (e.g. "zh-CN", "en").
+    pub language: String,
+    /// Whether to play a sound when a notification is raised.
+    pub sound_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -41,6 +51,8 @@ impl Default for AppConfig {
             download_dir: default_download_dir(),
             port: DEFAULT_PORT,
             status: UserStatus::Online,
+            language: DEFAULT_LOCALE.to_string(),
+            sound_enabled: true,
         }
     }
 }
@@ -119,6 +131,11 @@ impl AppConfig {
 
         if self.download_dir.as_os_str().is_empty() {
             self.download_dir = default_download_dir();
+            changed = true;
+        }
+
+        if !SUPPORTED_LOCALES.contains(&self.language.as_str()) {
+            self.language = DEFAULT_LOCALE.to_string();
             changed = true;
         }
 
@@ -205,6 +222,8 @@ mod tests {
             download_dir: PathBuf::from("/tmp/files"),
             port: 3000,
             status: UserStatus::Away,
+            language: "en".to_string(),
+            sound_enabled: true,
         };
         cfg.save_to(&path).expect("save should succeed");
 
@@ -260,6 +279,8 @@ mod tests {
             download_dir: PathBuf::from("/keep"),
             port: 0,
             status: UserStatus::Online,
+            language: DEFAULT_LOCALE.to_string(),
+            sound_enabled: true,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -275,6 +296,8 @@ mod tests {
             download_dir: PathBuf::from("/d"),
             port: 2425,
             status: UserStatus::Online,
+            language: DEFAULT_LOCALE.to_string(),
+            sound_enabled: true,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -288,6 +311,8 @@ mod tests {
             download_dir: PathBuf::from("/d"),
             port: 2425,
             status: UserStatus::Online,
+            language: DEFAULT_LOCALE.to_string(),
+            sound_enabled: true,
         };
         assert!(!cfg.normalize());
     }
@@ -296,5 +321,31 @@ mod tests {
     fn config_dir_should_end_with_lanchat() {
         let dir = config_dir();
         assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("LanChat"));
+    }
+
+    #[test]
+    fn normalize_should_clamp_unsupported_language_to_default() {
+        let mut cfg = AppConfig {
+            nickname: "Alice".to_string(),
+            download_dir: PathBuf::from("/d"),
+            port: 2425,
+            status: UserStatus::Online,
+            language: "ja-JP".to_string(),
+            sound_enabled: true,
+        };
+        assert!(cfg.normalize());
+        assert_eq!(cfg.language, DEFAULT_LOCALE);
+
+        // Supported locale should pass through unchanged.
+        let mut cfg2 = AppConfig {
+            nickname: "Bob".to_string(),
+            download_dir: PathBuf::from("/d"),
+            port: 2425,
+            status: UserStatus::Online,
+            language: "en".to_string(),
+            sound_enabled: true,
+        };
+        assert!(!cfg2.normalize());
+        assert_eq!(cfg2.language, "en");
     }
 }

@@ -14,8 +14,9 @@ use std::time::Instant;
 use flyq_core::{AppConfig, EventHandler, UiEvent};
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
+use rust_i18n::t;
 use gpui::{
-    div, px, white, AnyElement, App, AsyncApp, Context, Entity, ExternalPaths, Hsla,
+    div, px, white, AnyElement, App, AsyncApp, ClickEvent, Context, Entity, ExternalPaths, Hsla,
     PathPromptOptions, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
@@ -28,6 +29,7 @@ use crate::chat;
 use crate::notify;
 use crate::settings;
 use crate::sidebar;
+use crate::sound;
 use crate::tokio_runtime::Tokio;
 
 /// Delivery/read state of an outgoing message.
@@ -196,6 +198,10 @@ pub struct LanChatApp {
     settings_download: Entity<InputState>,
     /// Settings form: network port field.
     settings_port: Entity<InputState>,
+    /// Settings form: selected locale (e.g. "zh-CN" or "en").
+    settings_language: String,
+    /// Settings form: sound enabled toggle.
+    settings_sound_enabled: bool,
     /// Known chat groups.
     groups: Vec<flyq_core::Group>,
     /// Group message history keyed by group_id.
@@ -203,6 +209,7 @@ pub struct LanChatApp {
     /// Currently open group (mutually exclusive with peer `selected`).
     selected_group: Option<String>,
     /// Groups whose history has been loaded from the database.
+    #[allow(dead_code)]
     group_history_loaded: HashSet<String>,
 }
 
@@ -225,22 +232,24 @@ impl LanChatApp {
         let rt = Tokio::handle(cx);
 
         let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Type a message, press Enter to send…")
+            InputState::new(window, cx).placeholder(&t!("app.input_placeholder").to_string())
         });
 
         // Settings form fields, prefilled from the loaded config.
-        let settings_nickname = cx.new(|cx| InputState::new(window, cx).placeholder("昵称"));
+        let settings_nickname = cx.new(|cx| InputState::new(window, cx).placeholder(&t!("app.nickname_placeholder").to_string()));
         settings_nickname.update(cx, |i, cx| {
             i.set_value(&config.nickname, window, cx);
         });
-        let settings_download = cx.new(|cx| InputState::new(window, cx).placeholder("下载目录"));
+        let settings_download = cx.new(|cx| InputState::new(window, cx).placeholder(&t!("app.download_dir_placeholder").to_string()));
         settings_download.update(cx, |i, cx| {
             i.set_value(config.download_dir.to_string_lossy().as_ref(), window, cx);
         });
-        let settings_port = cx.new(|cx| InputState::new(window, cx).placeholder("端口"));
+        let settings_port = cx.new(|cx| InputState::new(window, cx).placeholder(&t!("app.port_placeholder").to_string()));
         settings_port.update(cx, |i, cx| {
             i.set_value(config.port.to_string(), window, cx);
         });
+        let initial_language = config.language.clone();
+        let initial_sound = config.sound_enabled;
 
         // Enter sends the message; other input events are ignored for now.
         cx.subscribe_in(
@@ -279,6 +288,8 @@ impl LanChatApp {
             settings_nickname,
             settings_download,
             settings_port,
+            settings_language: initial_language,
+            settings_sound_enabled: initial_sound,
             groups: Vec::new(),
             group_conversations: HashMap::new(),
             selected_group: None,
@@ -350,6 +361,9 @@ impl LanChatApp {
                 let viewing = self.selected == Some(sender_addr);
                 if !viewing {
                     notify::message(&self.rt, &sender, &content);
+                    if self.config.sound_enabled {
+                        sound::play_notification();
+                    }
                 }
                 self.conversations.entry(sender_addr).or_default().push(ChatMsg {
                     id,
@@ -400,7 +414,7 @@ impl LanChatApp {
             UiEvent::Knock { from: _, name } => {
                 // Trigger the screen-shake animation and a transient banner.
                 self.shake = Some(Instant::now());
-                self.knock_banner = Some((format!("{} 抖了抖你", name), Instant::now()));
+                self.knock_banner = Some((t!("app.knock_banner", name = name).to_string(), Instant::now()));
             }
             UiEvent::DeliveryConfirmed {
                 original_packet_no,
@@ -454,6 +468,9 @@ impl LanChatApp {
                 // Always notify: an incoming file needs the user's attention to
                 // accept or reject it.
                 notify::file_offer(&self.rt, &name, files.len());
+                if self.config.sound_enabled {
+                    sound::play_notification();
+                }
                 for f in files {
                     self.file_offers.push(FileOfferPrompt {
                         from,
@@ -489,6 +506,9 @@ impl LanChatApp {
                 path,
             } => {
                 notify::file_complete(&self.rt, &filename);
+                if self.config.sound_enabled {
+                    sound::play_notification();
+                }
                 let t = self.transfers.entry(transfer_id).or_insert(Transfer {
                     filename,
                     received: 0,
@@ -599,7 +619,10 @@ impl LanChatApp {
                 self.names.insert(sender_addr, sender.clone());
                 let viewing = self.selected == Some(sender_addr);
                 if !viewing {
-                    notify::message(&self.rt, &sender, "[图片]");
+                    notify::message(&self.rt, &sender, &t!("app.image_placeholder").to_string());
+                    if self.config.sound_enabled {
+                        sound::play_notification();
+                    }
                 }
                 self.conversations.entry(sender_addr).or_default().push(ChatMsg {
                     id,
@@ -833,6 +856,8 @@ impl LanChatApp {
     /// Open the settings modal.
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = true;
+        self.settings_language = self.config.language.clone();
+        self.settings_sound_enabled = self.config.sound_enabled;
         cx.notify();
     }
 
@@ -886,6 +911,8 @@ impl LanChatApp {
             download_dir,
             port,
             status: self.config.status,
+            language: self.settings_language.clone(),
+            sound_enabled: self.settings_sound_enabled,
         };
         config.normalize();
 
@@ -895,6 +922,11 @@ impl LanChatApp {
                 "Failed to create download dir {:?}: {}",
                 config.download_dir, e
             );
+        }
+
+        // Apply locale change live so the UI updates immediately.
+        if config.language != self.config.language {
+            rust_i18n::set_locale(&config.language);
         }
 
         // Persist to disk off the UI thread.
@@ -1115,7 +1147,7 @@ impl Render for LanChatApp {
                         files: true,
                         directories: false,
                         multiple: false,
-                        prompt: Some("选择图片".into()),
+                        prompt: Some(t!("app.select_image").to_string().into()),
                     });
                     let handler = img_handler.clone();
                     img_rt.spawn(async move {
@@ -1313,11 +1345,10 @@ impl Render for LanChatApp {
                             div()
                                 .text_xs()
                                 .text_color(palette.muted_foreground)
-                                .child(format!(
-                                    "{} 想发送{}给你",
-                                    offer.from_name,
-                                    if offer.is_dir { "文件夹" } else { "文件" }
-                                )),
+                                .child({
+                                    let file_type = if offer.is_dir { t!("app.file_offer_folder").to_string() } else { t!("app.file_offer_file").to_string() };
+                                    t!("app.file_offer", name = offer.from_name, file_type = file_type).to_string()
+                                }),
                         )
                         .child(
                             h_flex()
@@ -1327,7 +1358,7 @@ impl Render for LanChatApp {
                                 .child(
                                     Button::new(reject_id)
                                         .xsmall()
-                                        .label("拒绝")
+                                        .label(&t!("app.reject").to_string())
                                         .on_click(move |_, _, cx| {
                                             reject_this.update(cx, |app, cx| {
                                                 app.reject_offer(&reject_offer, cx)
@@ -1338,7 +1369,7 @@ impl Render for LanChatApp {
                                     Button::new(accept_id)
                                         .primary()
                                         .xsmall()
-                                        .label("接收")
+                                        .label(&t!("app.accept").to_string())
                                         .on_click(move |_, _, cx| {
                                             accept_this.update(cx, |app, cx| {
                                                 app.accept_offer(&accept_offer, cx)
@@ -1408,7 +1439,7 @@ impl Render for LanChatApp {
                             div()
                                 .text_xs()
                                 .text_color(palette.success)
-                                .child("已保存"),
+                                .child(t!("app.saved").to_string()),
                         )
                         .child(
                             h_flex()
@@ -1428,7 +1459,7 @@ impl Render for LanChatApp {
                                 .children(reveal_path.map(|p| {
                                     Button::new(format!("open-{}", tid))
                                         .xsmall()
-                                        .label("打开文件夹")
+                                        .label(&t!("app.open_folder").to_string())
                                         .on_click(move |_, _, cx| cx.reveal_path(&p))
                                         .into_any_element()
                                 })),
@@ -1440,7 +1471,7 @@ impl Render for LanChatApp {
                             div()
                                 .text_xs()
                                 .text_color(palette.danger)
-                                .child(t.error.clone().unwrap_or_else(|| "传输失败".to_string())),
+                                .child(t.error.clone().unwrap_or_else(|| t!("app.transfer_failed").to_string())),
                         )
                         .child(
                             h_flex().w_full().justify_end().child(
@@ -1482,10 +1513,28 @@ impl Render for LanChatApp {
         if self.settings_open {
             let save_this = this.clone();
             let cancel_this = this.clone();
+            let lang_this = this.clone();
+            let sound_this = this.clone();
+            let current_lang = self.settings_language.clone();
+            let current_sound = self.settings_sound_enabled;
+            let on_lang_change: std::sync::Arc<dyn Fn(&str, &mut App) + 'static> = std::sync::Arc::new(move |lang: &str, cx: &mut App| {
+                lang_this.update(cx, |app, cx| {
+                    app.settings_language = lang.to_string();
+                    cx.notify();
+                });
+            });
+            let on_sound_toggle = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                sound_this.update(cx, |app, cx| {
+                    app.settings_sound_enabled = !app.settings_sound_enabled;
+                    cx.notify();
+                });
+            };
             let modal = settings::render_settings_modal(
                 &self.settings_nickname,
                 &self.settings_download,
                 &self.settings_port,
+                &current_lang,
+                current_sound,
                 palette,
                 move |_, _, cx| {
                     save_this.update(cx, |app, cx| app.save_settings(cx));
@@ -1493,6 +1542,8 @@ impl Render for LanChatApp {
                 move |_, _, cx| {
                     cancel_this.update(cx, |app, cx| app.close_settings(cx));
                 },
+                on_lang_change,
+                on_sound_toggle,
             );
             root = root.child(modal);
         }

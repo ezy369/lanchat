@@ -17,6 +17,9 @@ mod notify;
 pub mod screenshot;
 pub mod settings;
 pub mod sidebar;
+pub mod sound;
 pub mod tokio_runtime;
+
+rust_i18n::i18n!("locales");
 
 pub use app::{ChatMsg, LanChatApp};

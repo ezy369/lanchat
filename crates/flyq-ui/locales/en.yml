@@ -1,0 +1,71 @@
+app:
+  input_placeholder: "Type a message, press Enter to send…"
+  knock_banner: "%{name} shook you"
+  image_placeholder: "[Image]"
+  select_image: "Select image"
+  file_offer: "%{name} wants to send %{file_type} to you"
+  file_offer_file: "file"
+  file_offer_folder: "folder"
+  reject: "Reject"
+  accept: "Accept"
+  saved: "Saved"
+  open_folder: "Open folder"
+  transfer_failed: "Transfer failed"
+  nickname_placeholder: "Nickname"
+  download_dir_placeholder: "Download directory"
+  port_placeholder: "Port"
+
+chat:
+  send_file: "Send file"
+  send_folder: "Send folder"
+  send_image: "Send image"
+  screenshot: "Screenshot"
+  knock: "Screen shake"
+  empty_conversation: "No messages yet — say hello!"
+  typing: "%{name} is typing…"
+  send: "Send"
+  group_empty: "No messages in the group yet — try sending one!"
+  you: "You"
+  image_placeholder: "[Image]"
+  select_peer: "Select a peer to start chatting"
+
+sidebar:
+  title: "LanChat"
+  online_count: "%{name} · %{count} online"
+  settings: "Settings"
+  my_status: "My status · %{status}"
+  switch: "Switch"
+  searching: "Searching for peers on the LAN…"
+  groups: "Groups"
+  contacts: "Contacts"
+  typing: "typing…"
+  members: "%{count} members"
+
+settings:
+  title: "Settings"
+  nickname: "Nickname"
+  download_dir: "Download directory"
+  port: "Port"
+  language: "Language"
+  help_text: "Download dir takes effect immediately; nickname and port apply to the network after restarting LanChat."
+  cancel: "Cancel"
+  save: "Save"
+  sound_enabled: "Notification sound"
+
+notify:
+  app_name: "LanChat"
+  file_offer_one: "1 file incoming, waiting to be received"
+  file_offer_many: "%{count} files incoming, waiting to be received"
+  message_from: "Message from %{name}"
+  file_from: "Files from %{name}"
+  file_complete: "File received"
+
+status:
+  online: "Online"
+  away: "Away"
+  busy: "Busy"
+  offline: "Offline"
+
+tray:
+  show_window: "Show window"
+  quit: "Quit"

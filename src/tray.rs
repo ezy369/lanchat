@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use gpui::{AsyncApp, WindowHandle};
 use gpui_component::Root;
+use rust_i18n::t;
 use tray_icon::menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -84,8 +85,8 @@ fn activate_window(window: &WindowHandle<Root>, cx: &mut AsyncApp) {
 /// intentionally never returns except on quit.
 pub fn run_tray(cx: &mut AsyncApp, window: WindowHandle<Root>) {
     let menu = Menu::new();
-    let show_item = MenuItem::with_id(SHOW_ID, "显示主窗口", true, None);
-    let quit_item = MenuItem::with_id(QUIT_ID, "退出", true, None);
+    let show_item = MenuItem::with_id(SHOW_ID, t!("tray.show_window").to_string(), true, None);
+    let quit_item = MenuItem::with_id(QUIT_ID, t!("tray.quit").to_string(), true, None);
     let separator = PredefinedMenuItem::separator();
     let items: [&dyn IsMenuItem; 3] = [&show_item, &separator, &quit_item];
     if let Err(e) = menu.append_items(&items) {

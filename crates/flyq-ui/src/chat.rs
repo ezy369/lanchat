@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Local};
 use gpui::prelude::*;
+use rust_i18n::t;
 use gpui::{div, img, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, ObjectFit, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
@@ -53,31 +54,31 @@ pub fn render_chat_panel(
                 .child(
                     Button::new("send-file-btn")
                         .small()
-                        .label("发送文件")
+                        .label(&t!("chat.send_file").to_string())
                         .on_click(on_send_file),
                 )
                 .child(
                     Button::new("send-folder-btn")
                         .small()
-                        .label("发送文件夹")
+                        .label(&t!("chat.send_folder").to_string())
                         .on_click(on_send_folder),
                 )
                 .child(
                     Button::new("send-image-btn")
                         .small()
-                        .label("发送图片")
+                        .label(&t!("chat.send_image").to_string())
                         .on_click(on_send_image),
                 )
                 .child(
                     Button::new("screenshot-btn")
                         .small()
-                        .label("截图")
+                        .label(&t!("chat.screenshot").to_string())
                         .on_click(on_screenshot),
                 )
                 .child(
                     Button::new("knock-btn")
                         .small()
-                        .label("抖屏")
+                        .label(&t!("chat.knock").to_string())
                         .on_click(on_knock),
                 ),
         );
@@ -96,7 +97,7 @@ pub fn render_chat_panel(
                         div()
                             .text_xs()
                             .text_color(palette.muted_foreground)
-                            .child("No messages yet — say hello!"),
+                            .child(t!("chat.empty_conversation").to_string()),
                     ),
             )
             .into_any_element()
@@ -123,7 +124,7 @@ pub fn render_chat_panel(
             .pb(px(4.0))
             .text_xs()
             .text_color(palette.muted_foreground)
-            .child(format!("{} is typing…", t))
+            .child(t!("chat.typing", name = t).to_string())
             .into_any_element()
     });
 
@@ -140,7 +141,7 @@ pub fn render_chat_panel(
         .child(
             Button::new("send-btn")
                 .primary()
-                .label("Send")
+                .label(&t!("chat.send").to_string())
                 .on_click(on_send),
         );
 
@@ -196,7 +197,7 @@ pub fn render_group_chat_panel(
                         div()
                             .text_xs()
                             .text_color(palette.muted_foreground)
-                            .child("群组还没有消息 — 发一条试试！"),
+                            .child(t!("chat.group_empty").to_string()),
                     ),
             )
             .into_any_element()
@@ -229,7 +230,7 @@ pub fn render_group_chat_panel(
         .child(
             Button::new("group-send-btn")
                 .primary()
-                .label("Send")
+                .label(&t!("chat.send").to_string())
                 .on_click(on_send),
         );
 
@@ -257,7 +258,7 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
             MsgStatus::Delivered => "✓",
             MsgStatus::Read => "✓✓",
         };
-        format!("{} · You · {}", time, mark)
+        format!("{} · {} · {}", time, t!("chat.you"), mark)
     } else {
         format!("{} · {}", time, msg.sender_name)
     };
@@ -299,7 +300,7 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
                 .bg(bg)
                 .text_color(fg)
                 .text_sm()
-                .child("[图片]")
+                .child(t!("chat.image_placeholder").to_string())
                 .into_any_element()
         }
     } else {
@@ -336,7 +337,7 @@ fn empty_chat(palette: Palette) -> AnyElement {
             div()
                 .text_lg()
                 .text_color(palette.muted_foreground)
-                .child("Select a peer to start chatting"),
+                .child(t!("chat.select_peer").to_string()),
         )
         .into_any_element()
 }

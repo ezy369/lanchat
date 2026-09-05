@@ -2,11 +2,22 @@
 
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
+use rust_i18n::t;
 use gpui::{div, px, white, AnyElement, App, ClickEvent, FontWeight, Window};
 use gpui_component::button::Button;
 use gpui_component::{h_flex, v_flex, Sizable};
 
 use crate::app::{status_color, Palette};
+
+/// Map UserStatus to a translated label.
+fn status_label(status: UserStatus) -> String {
+    match status {
+        UserStatus::Online => t!("status.online").to_string(),
+        UserStatus::Away => t!("status.away").to_string(),
+        UserStatus::Busy => t!("status.busy").to_string(),
+        UserStatus::Offline => t!("status.offline").to_string(),
+    }
+}
 
 /// Render the full sidebar: a header plus the scrollable peer list.
 ///
@@ -31,13 +42,13 @@ pub fn render_sidebar(
                 .text_base()
                 .font_weight(FontWeight::BOLD)
                 .text_color(palette.foreground)
-                .child("LanChat"),
+                .child(t!("sidebar.title").to_string()),
         )
         .child(
             div()
                 .text_xs()
                 .text_color(palette.muted_foreground)
-                .child(format!("{} · {} online", local_name, peer_count)),
+                .child(t!("sidebar.online_count", name = local_name, count = peer_count).to_string()),
         );
 
     let top_row = h_flex()
@@ -48,7 +59,7 @@ pub fn render_sidebar(
         .child(
             Button::new("settings-btn")
                 .xsmall()
-                .label("设置")
+                .label(&t!("sidebar.settings").to_string())
                 .on_click(on_open_settings),
         );
 
@@ -77,13 +88,13 @@ pub fn render_sidebar(
                     div()
                         .text_xs()
                         .text_color(palette.foreground)
-                        .child(format!("我的状态 · {}", local_status.label())),
+                        .child(t!("sidebar.my_status", status = status_label(local_status)).to_string()),
                 )
                 .child(
                     div()
                         .text_xs()
                         .text_color(palette.muted_foreground)
-                        .child("切换"),
+                        .child(t!("sidebar.switch").to_string()),
                 ),
         );
 
@@ -106,7 +117,7 @@ pub fn render_sidebar(
             .py(px(16.0))
             .text_xs()
             .text_color(palette.muted_foreground)
-            .child("Searching for peers on the LAN…")
+            .child(t!("sidebar.searching").to_string())
             .into_any_element()
     } else {
         let mut items: Vec<AnyElement> = Vec::new();
@@ -121,7 +132,7 @@ pub fn render_sidebar(
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(palette.muted_foreground)
-                    .child("群组")
+                    .child(t!("sidebar.groups").to_string())
                     .into_any_element(),
             );
             items.extend(group_rows);
@@ -137,7 +148,7 @@ pub fn render_sidebar(
                     .text_xs()
                     .font_weight(FontWeight::BOLD)
                     .text_color(palette.muted_foreground)
-                    .child("联系人")
+                    .child(t!("sidebar.contacts").to_string())
                     .into_any_element(),
             );
             items.extend(rows);
@@ -172,7 +183,7 @@ pub fn peer_row(
 ) -> AnyElement {
     let dot_color = status_color(peer.status, peer.online, palette);
     let subtitle = if typing.is_some() {
-        "typing…".to_string()
+        t!("sidebar.typing").to_string()
     } else {
         peer.host.clone()
     };
@@ -286,7 +297,7 @@ pub fn group_row(
                         div()
                             .text_xs()
                             .text_color(palette.muted_foreground)
-                            .child(format!("{} 成员", member_count)),
+                            .child(t!("sidebar.members", count = member_count).to_string()),
                     ),
             ),
     )

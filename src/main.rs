@@ -4,16 +4,18 @@
 
 use std::sync::Arc;
 
-use flyq_core::{run_event_loop, AppConfig, EventHandler, UiEvent};
+use flyq_core::{AppConfig, EventHandler, UiEvent, run_event_loop};
 use flyq_network::{DiscoveryConfig, DiscoveryService, FileRegistry, PeerManager, Transport};
 use flyq_storage::Database;
-use flyq_ui::tokio_runtime;
 use flyq_ui::LanChatApp;
+use flyq_ui::tokio_runtime;
 use gpui::prelude::*;
-use gpui::{px, size, Bounds, WindowBounds, WindowOptions};
+use gpui::{Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
+
+rust_i18n::i18n!("locales");
 
 // The system tray is only wired on Windows and macOS, mirroring the
 // target-gated `tray-icon` dependency in Cargo.toml (the Linux backend pulls
@@ -30,7 +32,12 @@ const DB_PATH: &str = "lanchat.db";
 /// and the loaded configuration (so the UI can prefill the settings panel). The
 /// discovery loop and the core event loop are spawned as detached Tokio tasks
 /// that live for the whole application lifetime.
-async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String, AppConfig) {
+async fn bootstrap() -> (
+    mpsc::Receiver<UiEvent>,
+    Arc<EventHandler>,
+    String,
+    AppConfig,
+) {
     // Load persisted user settings (nickname / download dir / port).
     let app_config = AppConfig::load();
 
@@ -79,7 +86,11 @@ async fn bootstrap() -> (mpsc::Receiver<UiEvent>, Arc<EventHandler>, String, App
             });
         }
         Err(e) => {
-            tracing::error!("Failed to bind TCP file transfer server on {}: {}", tcp_addr, e);
+            tracing::error!(
+                "Failed to bind TCP file transfer server on {}: {}",
+                tcp_addr,
+                e
+            );
         }
     }
 
@@ -136,12 +147,15 @@ fn main() {
             let rt = tokio_runtime::Tokio::handle(cx);
             let (ui_rx, handler, local_name, app_config) = rt.block_on(bootstrap());
 
+            // Apply persisted locale before any UI renders.
+            rust_i18n::set_locale(&app_config.language);
+
             cx.spawn(async move |cx| {
                 let window = cx
                     .open_window(
                         WindowOptions {
                             window_bounds: Some(WindowBounds::Windowed(Bounds {
-                                origin: gpui::Point::default(),
+                                origin: gpui::Point::new(px(40.0), px(40.0)),
                                 size: size(px(1024.0), px(680.0)),
                             })),
                             titlebar: Some(gpui::TitlebarOptions {

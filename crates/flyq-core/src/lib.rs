@@ -9,6 +9,6 @@ pub mod config;
 pub mod handlers;
 
 pub use app_state::AppState;
-pub use config::{AppConfig, DEFAULT_PORT};
+pub use config::{AppConfig, DEFAULT_LOCALE, DEFAULT_PORT, SUPPORTED_LOCALES};
 pub use handlers::{run_event_loop, EventHandler, HistoryMsg, IncomingFile, UiEvent};
 pub use flyq_storage::Group;
