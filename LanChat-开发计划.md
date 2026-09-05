@@ -185,11 +185,11 @@ fly-q-rs/
 **目标：** 消除所有 `handle_packet` 中落入 `Unhandled` 分支的命令，使协议层完整可用。
 
 **交付物：**
-- [ ] 用户列表请求协议：实现 BrIsGetList（广播列表请求）→ OkGetList（确认）→ GetList（拉取）→ AnsList（返回列表）完整四步握手
-- [ ] DelMsg（0x31）：对端删除/撤回消息通知，本地会话中对应消息标记为已撤回或删除
-- [ ] AnsReadMsg（0x32）：已读回执确认闭环（对端确认收到 ReadMsg 后的应答处理）
-- [ ] OpenYou（0x77）：实现 FeiQ 头文件中定义的命令，用途待确认（先做 no-op + 日志记录）
-- [ ] 单元测试覆盖所有新增命令的解析与处理
+- [x] 用户列表请求协议：实现 BrIsGetList（广播列表请求）→ OkGetList（确认）→ GetList（拉取）→ AnsList（返回列表）完整四步握手
+- [x] DelMsg（0x31）：对端删除/撤回消息通知，本地会话中对应消息标记为已撤回或删除
+- [x] AnsReadMsg（0x32）：已读回执确认闭环（对端确认收到 ReadMsg 后的应答处理）
+- [x] OpenYou（0x77）：实现 FeiQ 头文件中定义的命令，用途待确认（先做 no-op + 日志记录）
+- [x] 单元测试覆盖所有新增命令的解析与处理
 
 **验收标准：** 所有 Command 枚举值在 `handle_packet` 中均有明确处理分支（不再落入 fallback）；DelMsg 和 AnsReadMsg 的端到端行为可验证。
 

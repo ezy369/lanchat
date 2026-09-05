@@ -13,10 +13,11 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "INSERT INTO messages (id, sender, recipient, content, timestamp, read)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO messages (id, sender, recipient, content, timestamp, read, packet_no)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
             .await?;
+        let pkt: Option<i64> = msg.packet_no.map(|n| n as i64);
         stmt.execute((
             msg.id.as_str(),
             msg.sender.as_str(),
@@ -24,6 +25,7 @@ impl Database {
             msg.content.as_str(),
             msg.timestamp,
             msg.read as i64,
+            pkt,
         ))
         .await?;
         Ok(())
@@ -34,6 +36,27 @@ impl Database {
         let affected = self
             .conn
             .execute("DELETE FROM messages WHERE id = ?1", [id])
+            .await?;
+        Ok(affected > 0)
+    }
+
+    /// Delete a message by the sender's original packet_no.
+    ///
+    /// Used for the IPMsg DelMsg command: the sender asks us to delete the
+    /// message identified by their `packet_no`. The `sender_addr` parameter
+    /// is the peer's `ip:port` string, ensuring we only delete messages
+    /// received from that specific peer.
+    pub async fn delete_message_by_packet_no(
+        &self,
+        sender_addr: &str,
+        packet_no: u32,
+    ) -> Result<bool, DbError> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM messages WHERE sender = ?1 AND packet_no = ?2",
+                (sender_addr, packet_no as i64),
+            )
             .await?;
         Ok(affected > 0)
     }
@@ -90,7 +113,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no
                  FROM messages
                  WHERE (sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1)
                  ORDER BY timestamp DESC
@@ -151,7 +174,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no
                  FROM messages
                  WHERE sender = ?1 OR recipient = ?1
                  ORDER BY timestamp DESC
@@ -245,6 +268,7 @@ impl Database {
                     content,
                     timestamp,
                     read: read != 0,
+                    packet_no: None,
                 },
                 rank,
                 snippet,
@@ -326,6 +350,7 @@ impl Database {
                     content,
                     timestamp,
                     read: read != 0,
+                    packet_no: None,
                 },
                 rank,
                 snippet,
@@ -486,7 +511,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no
                  FROM messages
                  WHERE ((sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1))
                    AND timestamp >= ?3 AND timestamp <= ?4
@@ -603,5 +628,6 @@ fn row_to_message(row: &libsql::Row) -> Result<StoredMessage, DbError> {
         content: row.get::<String>(3)?,
         timestamp: row.get::<i64>(4)?,
         read: row.get::<i64>(5)? != 0,
+        packet_no: row.get::<Option<i64>>(6)?.map(|n| n as u32),
     })
 }

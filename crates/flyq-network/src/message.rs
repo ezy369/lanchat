@@ -224,6 +224,19 @@ impl MessageSender {
         self.send_packet(&packet, to).await
     }
 
+    /// Ask a peer to delete/recall a message we previously sent (DelMsg).
+    ///
+    /// The extra field contains the packet_no of the original message we sent.
+    pub async fn send_del_msg(
+        &self,
+        to: SocketAddr,
+        original_packet_no: u32,
+    ) -> Result<(), MessageError> {
+        let extra = original_packet_no.to_string();
+        let packet = self.build(Command::DelMsg, 0, Some(&extra));
+        self.send_packet(&packet, to).await
+    }
+
     // ─── Typing Indicators ──────────────────────────────────────────────
 
     /// Send a "typing started" indicator to a peer.
@@ -255,6 +268,49 @@ impl MessageSender {
         image_id: &str,
     ) -> Result<(), MessageError> {
         let packet = self.build(Command::SendImage, flags::IPMSG_FILEATTACHOPT, Some(image_id));
+        self.send_packet(&packet, to).await
+    }
+
+    // ─── User List Protocol ──────────────────────────────────────────────
+
+    /// Broadcast a request for peer lists (BrIsGetList).
+    ///
+    /// Asks all peers on the LAN: "does anyone have a peer list to share?"
+    /// Peers that do will respond with OkGetList.
+    pub async fn send_br_is_get_list(&self) -> Result<(), MessageError> {
+        let packet = self.build(Command::BrIsGetList, 0, None);
+        let bytes = packet.as_bytes();
+        for &addr in &self.broadcast_addrs {
+            let _ = self.socket.send_to(bytes, addr).await;
+        }
+        let fallback = SocketAddr::from(([255, 255, 255, 255], self.port));
+        let _ = self.socket.send_to(bytes, fallback).await;
+        debug!("Broadcast BrIsGetList to {} addresses", self.broadcast_addrs.len());
+        Ok(())
+    }
+
+    /// Reply to a BrIsGetList: "yes, I have a list" (OkGetList).
+    pub async fn send_ok_get_list(&self, to: SocketAddr) -> Result<(), MessageError> {
+        let packet = self.build(Command::OkGetList, 0, None);
+        self.send_packet(&packet, to).await
+    }
+
+    /// Request the actual peer list from a peer (GetList).
+    pub async fn send_get_list(&self, to: SocketAddr) -> Result<(), MessageError> {
+        let packet = self.build(Command::GetList, 0, None);
+        self.send_packet(&packet, to).await
+    }
+
+    /// Send the peer list to a requesting peer (AnsList).
+    ///
+    /// The extra field contains newline-separated peer entries in the format:
+    /// `ip:port:userName:hostName`
+    pub async fn send_ans_list(
+        &self,
+        to: SocketAddr,
+        peer_entries: &str,
+    ) -> Result<(), MessageError> {
+        let packet = self.build(Command::AnsList, 0, Some(peer_entries));
         self.send_packet(&packet, to).await
     }
 

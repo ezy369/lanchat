@@ -87,6 +87,15 @@ impl Database {
                 ",
             )
             .await?;
+
+        // M6: add packet_no column for DelMsg (recall/delete) support.
+        // Best-effort: if the column already exists the ALTER TABLE will fail
+        // with a harmless "duplicate column" error that we can ignore.
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE messages ADD COLUMN packet_no INTEGER;")
+            .await;
+
         info!("Database migrations completed");
         Ok(())
     }

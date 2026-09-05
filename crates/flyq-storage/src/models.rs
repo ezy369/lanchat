@@ -11,6 +11,7 @@ pub struct StoredMessage {
     pub content: String,
     pub timestamp: i64,
     pub read: bool,
+    pub packet_no: Option<u32>,
 }
 
 /// A stored peer record.

@@ -407,4 +407,123 @@ mod tests {
         // Actually 0x21 maps to Unknown in our enum, which is correct for now
         assert_eq!(packet.extra.as_deref(), Some("999"));
     }
+
+    // ─── M6: DelMsg / AnsReadMsg / User List Protocol ───────────────────
+
+    #[test]
+    fn test_del_msg_build_and_parse() {
+        let packet = PacketBuilder::new()
+            .sender("Alice", "PC")
+            .packet_no(500)
+            .command(Command::DelMsg)
+            .extra("12345")
+            .build();
+
+        let parsed = PacketParser::parse(&packet).unwrap();
+        assert_eq!(parsed.command, Command::DelMsg);
+        assert_eq!(parsed.packet_no, 500);
+        assert_eq!(parsed.extra.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn test_del_msg_from_raw() {
+        // DelMsg = 0x31 = 49
+        let raw = "1:100:Alice:PC:49:777";
+        let packet = PacketParser::parse(raw).unwrap();
+        assert_eq!(packet.command, Command::DelMsg);
+        assert_eq!(packet.extra.as_deref(), Some("777"));
+    }
+
+    #[test]
+    fn test_ans_read_msg_from_raw() {
+        // AnsReadMsg = 0x32 = 50
+        let raw = "1:100:Alice:PC:50:888";
+        let packet = PacketParser::parse(raw).unwrap();
+        assert_eq!(packet.command, Command::AnsReadMsg);
+        assert_eq!(packet.extra.as_deref(), Some("888"));
+    }
+
+    #[test]
+    fn test_ans_list_build_and_parse() {
+        let entries = "192.168.1.10:2425:Bob:LAPTOP\n192.168.1.20:2425:Carol:DESKTOP";
+        let packet = PacketBuilder::new()
+            .sender("Alice", "PC")
+            .packet_no(200)
+            .command(Command::AnsList)
+            .extra(entries)
+            .build();
+
+        let parsed = PacketParser::parse(&packet).unwrap();
+        assert_eq!(parsed.command, Command::AnsList);
+        let extra = parsed.extra.as_deref().unwrap();
+        let lines: Vec<&str> = extra.split('\n').collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "192.168.1.10:2425:Bob:LAPTOP");
+        assert_eq!(lines[1], "192.168.1.20:2425:Carol:DESKTOP");
+    }
+
+    #[test]
+    fn test_br_is_get_list_from_raw() {
+        // BrIsGetList = 0x10 = 16
+        let raw = "1:100:Alice:PC:16";
+        let packet = PacketParser::parse(raw).unwrap();
+        assert_eq!(packet.command, Command::BrIsGetList);
+    }
+
+    #[test]
+    fn test_user_list_commands_roundtrip() {
+        for cmd in [
+            Command::BrIsGetList,
+            Command::OkGetList,
+            Command::GetList,
+            Command::AnsList,
+        ] {
+            let packet = PacketBuilder::new()
+                .sender("Test", "Host")
+                .packet_no(1)
+                .command(cmd)
+                .build();
+            let parsed = PacketParser::parse(&packet).unwrap();
+            assert_eq!(parsed.command, cmd, "roundtrip failed for {:?}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_all_command_variants_have_known_code() {
+        // Verify every Command variant maps to a known raw code and back.
+        let all_commands = [
+            Command::NoOperation,
+            Command::BrEntry,
+            Command::BrExit,
+            Command::AnsEntry,
+            Command::BrAbsence,
+            Command::BrIsGetList,
+            Command::OkGetList,
+            Command::GetList,
+            Command::AnsList,
+            Command::SendMsg,
+            Command::RecvMsg,
+            Command::GroupMsg,
+            Command::ReadMsg,
+            Command::DelMsg,
+            Command::AnsReadMsg,
+            Command::GetFileData,
+            Command::ReleaseFiles,
+            Command::GetDirFiles,
+            Command::OpenYou,
+            Command::TypingStart,
+            Command::TypingEnd,
+            Command::SendImage,
+            Command::Knock,
+        ];
+        for cmd in all_commands {
+            let raw = cmd.to_raw();
+            let roundtripped = Command::from_raw(raw);
+            assert_eq!(
+                roundtripped, cmd,
+                "command {:?} (0x{:02x}) failed roundtrip",
+                cmd, raw
+            );
+        }
+    }
 }

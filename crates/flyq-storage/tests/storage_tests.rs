@@ -19,6 +19,7 @@ fn make_msg(sender: &str, recipient: &str, content: &str, timestamp: i64, read: 
         content: content.to_string(),
         timestamp,
         read,
+        packet_no: None,
     }
 }
 
@@ -499,4 +500,70 @@ async fn test_messages_by_user() {
         .await
         .unwrap();
     assert_eq!(result.total, 3); // msg1, msg2, msg3 involve "me"
+}
+
+// ─── M6: DelMsg / packet_no Tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_packet_no_stored_and_retrieved() {
+    let db = setup_db().await;
+
+    let mut msg = make_msg("10.0.0.1:2425", "10.0.0.2:2425", "with pkt", 5000, false);
+    msg.packet_no = Some(42);
+    db.insert_message(&msg).await.unwrap();
+
+    let messages = db
+        .get_messages("10.0.0.1:2425", "10.0.0.2:2425", 10)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].packet_no, Some(42));
+}
+
+#[tokio::test]
+async fn test_delete_message_by_packet_no() {
+    let db = setup_db().await;
+
+    let mut msg1 = make_msg("10.0.0.1:2425", "10.0.0.2:2425", "first", 6000, false);
+    msg1.packet_no = Some(100);
+    let mut msg2 = make_msg("10.0.0.1:2425", "10.0.0.2:2425", "second", 6001, false);
+    msg2.packet_no = Some(101);
+    db.insert_message(&msg1).await.unwrap();
+    db.insert_message(&msg2).await.unwrap();
+
+    // Delete by packet_no should remove only the matching message.
+    let deleted = db
+        .delete_message_by_packet_no("10.0.0.1:2425", 100)
+        .await
+        .unwrap();
+    assert!(deleted, "should have deleted one message");
+
+    let remaining = db
+        .get_messages("10.0.0.1:2425", "10.0.0.2:2425", 10)
+        .await
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].packet_no, Some(101));
+}
+
+#[tokio::test]
+async fn test_delete_message_by_packet_no_not_found() {
+    let db = setup_db().await;
+
+    let msg = make_msg("10.0.0.1:2425", "10.0.0.2:2425", "only", 7000, false);
+    db.insert_message(&msg).await.unwrap();
+
+    // Trying to delete with a non-existent packet_no should return false.
+    let deleted = db
+        .delete_message_by_packet_no("10.0.0.1:2425", 999)
+        .await
+        .unwrap();
+    assert!(!deleted, "no message with that packet_no");
+
+    // Also verify wrong sender_addr doesn't match.
+    let deleted = db
+        .delete_message_by_packet_no("10.0.0.99:2425", 999)
+        .await
+        .unwrap();
+    assert!(!deleted, "wrong sender address");
 }

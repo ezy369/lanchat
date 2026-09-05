@@ -11,7 +11,7 @@ use flyq_network::{
 use flyq_protocol::command::flags;
 use flyq_protocol::{Command, Packet, PeerInfo, UserStatus};
 use flyq_storage::{Database, Page, StoredMessage};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
@@ -131,6 +131,11 @@ pub enum UiEvent {
         transfer_id: String,
         filename: String,
         error: String,
+    },
+    /// A peer asked us to delete/recall a message (DelMsg).
+    MessageDeleted {
+        sender_addr: SocketAddr,
+        packet_no: u32,
     },
 }
 
@@ -260,12 +265,32 @@ impl EventHandler {
             Command::SendMsg => self.handle_send_msg(packet, from).await,
             Command::RecvMsg => self.handle_recv_msg(packet, from).await,
             Command::ReadMsg => self.handle_read_msg(packet, from).await,
+            Command::DelMsg => self.handle_del_msg(packet, from).await,
             Command::TypingStart => self.handle_typing(packet, from, true).await,
             Command::TypingEnd => self.handle_typing(packet, from, false).await,
             Command::Knock => self.handle_knock(packet, from).await,
             Command::SendImage => self.handle_image(packet, from).await,
-            cmd => {
-                debug!("Unhandled command {:?} from {}", cmd, from);
+            Command::AnsReadMsg => self.handle_ans_read_msg(packet, from).await,
+            Command::OpenYou => self.handle_open_you(packet, from).await,
+            Command::BrIsGetList => self.handle_br_is_get_list(packet, from).await,
+            Command::OkGetList => self.handle_ok_get_list(packet, from).await,
+            Command::GetList => self.handle_get_list(packet, from).await,
+            Command::AnsList => self.handle_ans_list(packet, from).await,
+            // Commands handled by the discovery layer — no application-level action needed.
+            Command::NoOperation | Command::BrEntry | Command::BrExit
+            | Command::AnsEntry | Command::BrAbsence => {
+                debug!("Discovery-layer command {:?} from {} (no-op at handler level)", packet.command, from);
+            }
+            // Commands handled by the TCP transport layer.
+            Command::GetFileData | Command::ReleaseFiles | Command::GetDirFiles => {
+                debug!("Transport-layer command {:?} from {} (no-op at handler level)", packet.command, from);
+            }
+            // GroupMsg is handled in M7.
+            Command::GroupMsg => {
+                debug!("GroupMsg from {} — not yet implemented (M7)", from);
+            }
+            Command::Unknown => {
+                debug!("Unknown command from {} (flags=0x{:08x})", from, packet.command_flags);
             }
         }
     }
@@ -335,6 +360,7 @@ impl EventHandler {
             content: display_content.clone(),
             timestamp,
             read: false,
+            packet_no: Some(packet.packet_no),
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store message: {}", e);
@@ -411,6 +437,203 @@ impl EventHandler {
             .await;
     }
 
+    /// Handle a message deletion request (DelMsg).
+    ///
+    /// The sender asks us to delete the message identified by their original
+    /// `packet_no`. We match on (sender_addr, packet_no) in the database,
+    /// delete it, and notify the UI so the conversation view can update.
+    async fn handle_del_msg(&self, packet: Packet, from: SocketAddr) {
+        let original_no = packet
+            .extra
+            .as_deref()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        let sender_addr = format!("{}:{}", from.ip(), from.port());
+
+        if original_no == 0 {
+            debug!("DelMsg from {} with invalid packet_no, ignoring", from);
+            return;
+        }
+
+        match self
+            .db
+            .delete_message_by_packet_no(&sender_addr, original_no)
+            .await
+        {
+            Ok(true) => {
+                info!("Deleted message from {} (packet_no {})", from, original_no);
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::MessageDeleted {
+                        sender_addr: from,
+                        packet_no: original_no,
+                    })
+                    .await;
+            }
+            Ok(false) => {
+                debug!(
+                    "DelMsg from {} for packet_no {} — no matching message found",
+                    from, original_no
+                );
+            }
+            Err(e) => {
+                warn!("Failed to delete message (DelMsg from {}): {}", from, e);
+            }
+        }
+    }
+
+    /// Handle an AnsReadMsg — the peer confirms it processed our ReadMsg receipt.
+    ///
+    /// This is a protocol-level acknowledgment with no user-visible effect.
+    /// Our UI already updated the read status when we received the ReadMsg.
+    async fn handle_ans_read_msg(&self, packet: Packet, from: SocketAddr) {
+        let original_no = packet
+            .extra
+            .as_deref()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        debug!(
+            "AnsReadMsg from {}: peer acknowledged read receipt for packet {}",
+            from, original_no
+        );
+    }
+
+    /// Handle an OpenYou command (FeiQ extension, purpose unknown).
+    ///
+    /// This command is defined in the FeiQ protocol headers but its semantics
+    /// are undocumented. For now we log it for diagnostic purposes and take
+    /// no action.
+    async fn handle_open_you(&self, packet: Packet, from: SocketAddr) {
+        debug!(
+            "OpenYou from {} (sender={}, extra={:?}) — no-op (purpose unknown)",
+            from, packet.sender_name, packet.extra
+        );
+    }
+
+    // ─── User List Protocol (BrIsGetList / OkGetList / GetList / AnsList) ──
+
+    /// Handle BrIsGetList — a peer asks "does anyone have a list?"
+    ///
+    /// If we have any known peers, reply with OkGetList to say "yes, ask me".
+    async fn handle_br_is_get_list(&self, _packet: Packet, from: SocketAddr) {
+        let peer_count = self.peer_manager.peer_count().await;
+        if peer_count > 0 {
+            debug!(
+                "BrIsGetList from {}: we have {} peers, replying OkGetList",
+                from, peer_count
+            );
+            if let Err(e) = self.sender.send_ok_get_list(from).await {
+                warn!("Failed to send OkGetList to {}: {}", from, e);
+            }
+        } else {
+            debug!("BrIsGetList from {}: no peers known, ignoring", from);
+        }
+    }
+
+    /// Handle OkGetList — a peer says "yes, I have a list".
+    ///
+    /// Follow up with a GetList request to actually fetch the list.
+    async fn handle_ok_get_list(&self, _packet: Packet, from: SocketAddr) {
+        debug!("OkGetList from {}: requesting peer list", from);
+        if let Err(e) = self.sender.send_get_list(from).await {
+            warn!("Failed to send GetList to {}: {}", from, e);
+        }
+    }
+
+    /// Handle GetList — a peer requests our full peer list.
+    ///
+    /// Build an AnsList response with all known online peers.
+    async fn handle_get_list(&self, _packet: Packet, from: SocketAddr) {
+        let peers = self.peer_manager.online_peers().await;
+        if peers.is_empty() {
+            debug!("GetList from {}: no online peers to share", from);
+            return;
+        }
+
+        let entries: Vec<String> = peers
+            .iter()
+            .filter(|p| p.addr != from.ip()) // Don't list the requester themselves.
+            .map(|p| format!("{}:{}:{}:{}", p.addr, p.port, p.name, p.host))
+            .collect();
+
+        if entries.is_empty() {
+            debug!("GetList from {}: only peer is the requester, skipping", from);
+            return;
+        }
+
+        let payload = entries.join("\n");
+        debug!(
+            "GetList from {}: sending {} peer entries",
+            from,
+            entries.len()
+        );
+        if let Err(e) = self.sender.send_ans_list(from, &payload).await {
+            warn!("Failed to send AnsList to {}: {}", from, e);
+        }
+    }
+
+    /// Handle AnsList — a peer sent us their peer list.
+    ///
+    /// Parse the newline-separated entries (format: `ip:port:name:host`) and
+    /// add any unknown peers to our PeerManager so they appear in the sidebar.
+    async fn handle_ans_list(&self, packet: Packet, from: SocketAddr) {
+        let entries = match &packet.extra {
+            Some(e) if !e.is_empty() => e,
+            _ => {
+                debug!("AnsList from {}: empty list", from);
+                return;
+            }
+        };
+
+        let mut added = 0u32;
+        for line in entries.split('\n') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Format: ip:port:name:host
+            let mut parts = line.splitn(4, ':');
+            let (Some(ip_str), Some(port_str), Some(name), Some(host)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                debug!("AnsList: skipping malformed entry: {:?}", line);
+                continue;
+            };
+
+            let (Ok(ip), Ok(port)) = (ip_str.parse::<IpAddr>(), port_str.parse::<u16>()) else {
+                debug!(
+                    "AnsList: skipping entry with bad ip/port: {:?}",
+                    line
+                );
+                continue;
+            };
+
+            // Skip ourselves.
+            if ip == from.ip() && port == from.port() {
+                continue;
+            }
+
+            let addr = SocketAddr::new(ip, port);
+            // Don't overwrite existing peers — only add new ones.
+            if self.peer_manager.get_peer_by_addr(&ip).await.is_some() {
+                continue;
+            }
+
+            let peer = PeerInfo::new(name, host, addr);
+            self.peer_manager.add_or_update_peer(peer).await;
+            added += 1;
+        }
+
+        if added > 0 {
+            info!(
+                "AnsList from {}: added {} new peers",
+                from, added
+            );
+        }
+    }
+
     /// Handle typing indicators.
     async fn handle_typing(&self, packet: Packet, from: SocketAddr, started: bool) {
         let name = packet.sender_name.clone();
@@ -452,6 +675,7 @@ impl EventHandler {
             content: content.clone(),
             timestamp,
             read: false,
+            packet_no: Some(packet.packet_no),
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store image message: {}", e);
@@ -494,6 +718,7 @@ impl EventHandler {
             content: content.to_string(),
             timestamp,
             read: true, // Our own messages are always "read".
+            packet_no: Some(packet_no),
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent message: {}", e);
@@ -531,6 +756,34 @@ impl EventHandler {
     pub async fn send_knock(&self, to: SocketAddr) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.sender.send_knock(to).await?;
         Ok(())
+    }
+
+    /// Ask a peer to recall/delete a message we previously sent.
+    ///
+    /// Sends DelMsg over UDP and also removes the message from our local
+    /// database so both sides stay in sync.
+    pub async fn send_del_msg(
+        &self,
+        to: SocketAddr,
+        msg_id: &str,
+        packet_no: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.sender.send_del_msg(to, packet_no).await?;
+        // Also delete from our own database.
+        if let Err(e) = self.db.delete_message(msg_id).await {
+            warn!("Failed to locally delete recalled message {}: {}", msg_id, e);
+        }
+        Ok(())
+    }
+
+    /// Broadcast a BrIsGetList to discover peers beyond our direct broadcast range.
+    ///
+    /// Peers with known contacts will respond with OkGetList → GetList → AnsList,
+    /// adding new peers to the sidebar.
+    pub async fn request_peer_list(&self) {
+        if let Err(e) = self.sender.send_br_is_get_list().await {
+            warn!("Failed to broadcast BrIsGetList: {}", e);
+        }
     }
 
     /// Set our presence status and broadcast the change to the LAN.
@@ -636,6 +889,7 @@ impl EventHandler {
             content: display.clone(),
             timestamp,
             read: true,
+            packet_no: Some(packet_no),
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent file message: {}", e);

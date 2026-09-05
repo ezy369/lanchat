@@ -492,6 +492,15 @@ impl LanChatApp {
                 t.stage = TransferStage::Failed;
                 t.error = Some(error);
             }
+            UiEvent::MessageDeleted {
+                sender_addr,
+                packet_no,
+            } => {
+                // Remove the message from the conversation if it's currently loaded.
+                if let Some(msgs) = self.conversations.get_mut(&sender_addr) {
+                    msgs.retain(|m| m.packet_no != Some(packet_no));
+                }
+            }
         }
         cx.notify();
     }
