@@ -61,6 +61,10 @@ pub struct ChatMsg {
     pub packet_no: Option<u32>,
     /// Delivery/read state (meaningful for outgoing messages).
     pub status: MsgStatus,
+    /// Media type: 0 = text, 1 = image, 2 = file.
+    pub media_type: u8,
+    /// Local file path for image messages (media_type == 1).
+    pub image_path: Option<PathBuf>,
 }
 
 /// An incoming file offer awaiting the user's accept/reject decision.
@@ -355,6 +359,8 @@ impl LanChatApp {
                     sender_name: sender,
                     packet_no: Some(packet_no),
                     status: MsgStatus::Read,
+                    media_type: 0,
+                    image_path: None,
                 });
                 // If this conversation is currently open, acknowledge the read
                 // immediately so the peer sees the "read" state.
@@ -378,6 +384,8 @@ impl LanChatApp {
                         sender_name: self.local_name.clone(),
                         packet_no: Some(packet_no),
                         status: MsgStatus::Sent,
+                        media_type: 0,
+                        image_path: None,
                     });
                 } else {
                     warn!("MessageSent recipient not a socket addr: {}", recipient);
@@ -416,7 +424,7 @@ impl LanChatApp {
                     }
                     entry.push(ChatMsg {
                         id: h.id,
-                        text: h.text,
+                        text: h.text.clone(),
                         timestamp: h.timestamp,
                         outgoing: h.outgoing,
                         sender_name: if h.outgoing {
@@ -426,6 +434,12 @@ impl LanChatApp {
                         },
                         packet_no: None,
                         status: MsgStatus::Read,
+                        media_type: h.media_type,
+                        image_path: if h.media_type == 1 {
+                            Some(PathBuf::from(h.text))
+                        } else {
+                            None
+                        },
                     });
                 }
                 // Stable sort keeps same-second messages in insertion order.
@@ -536,6 +550,8 @@ impl LanChatApp {
                     } else {
                         MsgStatus::Delivered
                     },
+                    media_type: 0,
+                    image_path: None,
                 };
                 self.group_conversations
                     .entry(group_id.clone())
@@ -571,6 +587,53 @@ impl LanChatApp {
                 if self.selected_group.as_deref() == Some(&group_id) {
                     self.selected_group = None;
                 }
+            }
+            UiEvent::ImageReceived {
+                id,
+                sender,
+                sender_addr,
+                image_path,
+                timestamp,
+                packet_no,
+            } => {
+                self.names.insert(sender_addr, sender.clone());
+                let viewing = self.selected == Some(sender_addr);
+                if !viewing {
+                    notify::message(&self.rt, &sender, "[图片]");
+                }
+                self.conversations.entry(sender_addr).or_default().push(ChatMsg {
+                    id,
+                    text: String::new(),
+                    timestamp,
+                    outgoing: false,
+                    sender_name: sender,
+                    packet_no: Some(packet_no),
+                    status: MsgStatus::Read,
+                    media_type: 1,
+                    image_path: Some(PathBuf::from(image_path)),
+                });
+                if viewing {
+                    self.acknowledge_reads(sender_addr);
+                }
+            }
+            UiEvent::ImageSent {
+                id,
+                recipient,
+                image_path,
+                timestamp,
+                packet_no,
+            } => {
+                self.conversations.entry(recipient).or_default().push(ChatMsg {
+                    id,
+                    text: String::new(),
+                    timestamp,
+                    outgoing: true,
+                    sender_name: self.local_name.clone(),
+                    packet_no: Some(packet_no),
+                    status: MsgStatus::Sent,
+                    media_type: 1,
+                    image_path: Some(PathBuf::from(image_path)),
+                });
             }
         }
         cx.notify();
@@ -714,6 +777,8 @@ impl LanChatApp {
                     sender_name: local_name,
                     packet_no: None,
                     status: MsgStatus::Sending,
+                    media_type: 0,
+                    image_path: None,
                 });
             cx.notify();
 
@@ -967,6 +1032,8 @@ impl Render for LanChatApp {
             let file_rt = rt.clone();
             let folder_handler = handler.clone();
             let folder_rt = rt.clone();
+            let img_handler = handler.clone();
+            let img_rt = rt.clone();
             chat::render_chat_panel(
                 Some(&name),
                 &messages,
@@ -1039,6 +1106,28 @@ impl Render for LanChatApp {
                         }
                     });
                 },
+                move |_, _, cx| {
+                    // Image file picker — filter for common image formats.
+                    let rx = cx.prompt_for_paths(PathPromptOptions {
+                        files: true,
+                        directories: false,
+                        multiple: false,
+                        prompt: Some("选择图片".into()),
+                    });
+                    let handler = img_handler.clone();
+                    img_rt.spawn(async move {
+                        match rx.await {
+                            Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                let path = paths.into_iter().next().unwrap();
+                                if let Err(e) = handler.send_image_message(addr, path).await {
+                                    warn!("Failed to send image to {}: {}", addr, e);
+                                }
+                            }
+                            Ok(Err(e)) => warn!("Image picker error: {}", e),
+                            _ => {}
+                        }
+                    });
+                },
             )
         } else if let Some(ref gid) = selected_group {
             // Group chat panel — shows group messages with a simplified header.
@@ -1073,6 +1162,7 @@ impl Render for LanChatApp {
                 None,
                 &self.input,
                 palette,
+                |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},

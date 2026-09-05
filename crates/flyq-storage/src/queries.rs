@@ -14,8 +14,8 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "INSERT INTO messages (id, sender, recipient, content, timestamp, read, packet_no, group_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO messages (id, sender, recipient, content, timestamp, read, packet_no, group_id, media_type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .await?;
         let pkt: Option<i64> = msg.packet_no.map(|n| n as i64);
@@ -28,6 +28,7 @@ impl Database {
             msg.read as i64,
             pkt,
             msg.group_id.as_deref(),
+            msg.media_type as i64,
         ))
         .await?;
         Ok(())
@@ -115,7 +116,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id, media_type
                  FROM messages
                  WHERE (sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1)
                  ORDER BY timestamp DESC
@@ -176,7 +177,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id, media_type
                  FROM messages
                  WHERE sender = ?1 OR recipient = ?1
                  ORDER BY timestamp DESC
@@ -272,6 +273,7 @@ impl Database {
                     read: read != 0,
                     packet_no: None,
                     group_id: None,
+                    media_type: 0,
                 },
                 rank,
                 snippet,
@@ -355,6 +357,7 @@ impl Database {
                     read: read != 0,
                     packet_no: None,
                     group_id: None,
+                    media_type: 0,
                 },
                 rank,
                 snippet,
@@ -515,7 +518,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id, media_type
                  FROM messages
                  WHERE ((sender = ?1 AND recipient = ?2) OR (sender = ?2 AND recipient = ?1))
                    AND timestamp >= ?3 AND timestamp <= ?4
@@ -739,7 +742,7 @@ impl Database {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id
+                "SELECT id, sender, recipient, content, timestamp, read, packet_no, group_id, media_type
                  FROM messages
                  WHERE group_id = ?1
                  ORDER BY timestamp DESC
@@ -845,5 +848,6 @@ fn row_to_message(row: &libsql::Row) -> Result<StoredMessage, DbError> {
         read: row.get::<i64>(5)? != 0,
         packet_no: row.get::<Option<i64>>(6)?.map(|n| n as u32),
         group_id: row.get::<Option<String>>(7)?,
+        media_type: row.get::<Option<i64>>(8)?.unwrap_or(0) as u8,
     })
 }

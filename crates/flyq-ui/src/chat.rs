@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Local};
 use gpui::prelude::*;
-use gpui::{div, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
+use gpui::{div, img, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, ObjectFit, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{h_flex, v_flex, Sizable};
@@ -24,6 +24,7 @@ pub fn render_chat_panel(
     on_knock: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_send_file: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_send_folder: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_send_image: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let Some(name) = peer_name else {
         return empty_chat(palette);
@@ -59,6 +60,12 @@ pub fn render_chat_panel(
                         .small()
                         .label("发送文件夹")
                         .on_click(on_send_folder),
+                )
+                .child(
+                    Button::new("send-image-btn")
+                        .small()
+                        .label("发送图片")
+                        .on_click(on_send_image),
                 )
                 .child(
                     Button::new("knock-btn")
@@ -262,8 +269,22 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
         row.justify_start()
     };
 
-    row.child(
-        col.child(
+    // Render the bubble content: image or text.
+    let content = if msg.media_type == 1 {
+        if let Some(ref path) = msg.image_path {
+            // Image thumbnail — constrained to 240px wide, auto height.
+            div()
+                .rounded(px(10.0))
+                .overflow_hidden()
+                .child(
+                    img(path.clone())
+                        .w(px(240.0))
+                        .h(px(180.0))
+                        .object_fit(ObjectFit::Cover),
+                )
+                .into_any_element()
+        } else {
+            // Image message without a local path — show placeholder.
             div()
                 .px(px(12.0))
                 .py(px(8.0))
@@ -271,14 +292,29 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
                 .bg(bg)
                 .text_color(fg)
                 .text_sm()
-                .child(msg.text.clone()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(palette.muted_foreground)
-                .child(meta),
-        ),
+                .child("[图片]")
+                .into_any_element()
+        }
+    } else {
+        div()
+            .px(px(12.0))
+            .py(px(8.0))
+            .rounded(px(10.0))
+            .bg(bg)
+            .text_color(fg)
+            .text_sm()
+            .child(msg.text.clone())
+            .into_any_element()
+    };
+
+    row.child(
+        col.child(content)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.muted_foreground)
+                    .child(meta),
+            ),
     )
     .into_any_element()
 }

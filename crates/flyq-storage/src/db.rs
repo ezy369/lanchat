@@ -114,6 +114,16 @@ impl Database {
             )
             .await;
 
+        // M8: add media_type column for image/file message support.
+        // 0 = text, 1 = image, 2 = file. Defaults to 0 (text) for all
+        // existing rows.
+        let _ = self
+            .conn
+            .execute_batch(
+                "ALTER TABLE messages ADD COLUMN media_type INTEGER NOT NULL DEFAULT 0;",
+            )
+            .await;
+
         info!("Database migrations completed");
         Ok(())
     }

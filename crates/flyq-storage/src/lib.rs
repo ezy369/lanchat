@@ -13,5 +13,5 @@ pub mod queries;
 pub use db::{Database, DbError};
 pub use models::{
     ConversationSummary, Group, GroupSummary, MessageStats, Page, PagedResult, SearchResult,
-    StoredMessage, StoredPeer,
+    StoredMessage, StoredPeer, MEDIA_TYPE_FILE, MEDIA_TYPE_IMAGE, MEDIA_TYPE_TEXT,
 };

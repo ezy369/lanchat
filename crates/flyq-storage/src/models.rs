@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Media type: plain text message.
+pub const MEDIA_TYPE_TEXT: u8 = 0;
+/// Media type: inline image (thumbnail rendered in bubble, full image on disk).
+pub const MEDIA_TYPE_IMAGE: u8 = 1;
+/// Media type: file attachment (saved to download dir).
+pub const MEDIA_TYPE_FILE: u8 = 2;
+
 /// A stored chat message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
@@ -14,6 +21,8 @@ pub struct StoredMessage {
     pub packet_no: Option<u32>,
     /// Group ID for group messages; `None` for 1:1 messages.
     pub group_id: Option<String>,
+    /// Media type: 0 = text, 1 = image, 2 = file.
+    pub media_type: u8,
 }
 
 /// A stored peer record.

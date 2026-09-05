@@ -29,6 +29,8 @@ pub struct HistoryMsg {
     pub timestamp: i64,
     /// True when we sent this message.
     pub outgoing: bool,
+    /// Media type: 0 = text, 1 = image, 2 = file.
+    pub media_type: u8,
 }
 
 /// A single file offered by a peer in an incoming message.
@@ -156,6 +158,23 @@ pub enum UiEvent {
     /// A group was deleted.
     GroupDeleted {
         group_id: String,
+    },
+    /// An image message was received and downloaded to local disk.
+    ImageReceived {
+        id: String,
+        sender: String,
+        sender_addr: SocketAddr,
+        image_path: String,
+        timestamp: i64,
+        packet_no: u32,
+    },
+    /// An image message we sent was confirmed delivered.
+    ImageSent {
+        id: String,
+        recipient: SocketAddr,
+        image_path: String,
+        timestamp: i64,
+        packet_no: u32,
     },
 }
 
@@ -381,6 +400,7 @@ impl EventHandler {
             read: false,
             packet_no: Some(packet.packet_no),
             group_id: None,
+            media_type: 0,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store message: {}", e);
@@ -678,41 +698,150 @@ impl EventHandler {
     }
 
     /// Handle image message (SendImage).
+    ///
+    /// Downloads the image from the sender via TCP GetFileData, saves it
+    /// to the local image cache directory, persists the message with
+    /// media_type=1, and emits an ImageReceived event.
     async fn handle_image(&self, packet: Packet, from: SocketAddr) {
-        // Image messages use FILEATTACHOPT — the extra field contains the image ID.
-        // The actual image data is retrieved via TCP GetFileData.
         debug!("Image message from {}: {:?}", from, packet.extra);
-        // For now, treat as a regular message with an image placeholder.
-        let content = format!("[图片] {}", packet.extra.as_deref().unwrap_or(""));
+
+        let peer_id = format!("{}:{}", from.ip(), from.port());
         let timestamp = now_timestamp();
         let msg_id = Uuid::new_v4().to_string();
-        let peer_id = format!("{}:{}", from.ip(), from.port());
 
-        let stored = StoredMessage {
-            id: msg_id.clone(),
-            sender: peer_id,
-            recipient: self.local_id.clone(),
-            content: content.clone(),
-            timestamp,
-            read: false,
-            packet_no: Some(packet.packet_no),
-            group_id: None,
+        // Parse the file_id from the extra field (hex string, e.g. "00000001").
+        let extra = packet.extra.as_deref().unwrap_or("");
+        let file_id = match u32::from_str_radix(extra.trim(), 16) {
+            Ok(id) => id,
+            Err(_) => {
+                // Try parsing as decimal as a fallback.
+                match extra.trim().parse::<u32>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        warn!("Invalid image id in SendImage from {}: {:?}", from, extra);
+                        // Fall back to placeholder text.
+                        let content = format!("[图片] {}", extra);
+                        let stored = StoredMessage {
+                            id: msg_id.clone(),
+                            sender: peer_id,
+                            recipient: self.local_id.clone(),
+                            content,
+                            timestamp,
+                            read: false,
+                            packet_no: Some(packet.packet_no),
+                            group_id: None,
+                            media_type: 0,
+                        };
+                        let _ = self.db.insert_message(&stored).await;
+                        let _ = self
+                            .ui_tx
+                            .send(UiEvent::MessageReceived {
+                                id: msg_id,
+                                sender: packet.sender_name,
+                                sender_addr: from,
+                                content: "[图片]".to_string(),
+                                timestamp,
+                                packet_no: packet.packet_no,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
         };
-        if let Err(e) = self.db.insert_message(&stored).await {
-            warn!("Failed to store image message: {}", e);
+
+        // Create the images cache directory.
+        let images_dir = self.download_dir().join("images");
+        if let Err(e) = std::fs::create_dir_all(&images_dir) {
+            warn!("Failed to create images dir {:?}: {}", images_dir, e);
+            return;
         }
 
-        let _ = self
-            .ui_tx
-            .send(UiEvent::MessageReceived {
-                id: msg_id,
-                sender: packet.sender_name,
-                sender_addr: from,
-                content,
-                timestamp,
-                packet_no: packet.packet_no,
-            })
-            .await;
+        // Download the image via TCP.
+        let image_filename = format!("{}_{}.png", from.ip(), file_id);
+        let dest = images_dir.join(&image_filename);
+
+        info!(
+            "Downloading image {} (file_id={}) from {}",
+            image_filename, file_id, from
+        );
+        match FileDownloader::download(
+            from,
+            file_id,
+            0,
+            u64::MAX, // Read until sender closes connection.
+            &dest,
+            &self.local_name,
+            &self.local_host,
+            None, // No progress callback for images.
+        )
+        .await
+        {
+            Ok(bytes) => {
+                info!(
+                    "Image {} saved ({} bytes) to {:?}",
+                    image_filename, bytes, dest
+                );
+
+                let image_path = dest.to_string_lossy().to_string();
+
+                // Persist with media_type = 1 (image).
+                let stored = StoredMessage {
+                    id: msg_id.clone(),
+                    sender: peer_id,
+                    recipient: self.local_id.clone(),
+                    content: image_path.clone(),
+                    timestamp,
+                    read: false,
+                    packet_no: Some(packet.packet_no),
+                    group_id: None,
+                    media_type: 1,
+                };
+                if let Err(e) = self.db.insert_message(&stored).await {
+                    warn!("Failed to store image message: {}", e);
+                }
+
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::ImageReceived {
+                        id: msg_id,
+                        sender: packet.sender_name,
+                        sender_addr: from,
+                        image_path,
+                        timestamp,
+                        packet_no: packet.packet_no,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                warn!("Failed to download image from {}: {}", from, e);
+                // Store as a failed image message with placeholder.
+                let content = "[图片下载失败]".to_string();
+                let stored = StoredMessage {
+                    id: msg_id.clone(),
+                    sender: peer_id,
+                    recipient: self.local_id.clone(),
+                    content: content.clone(),
+                    timestamp,
+                    read: false,
+                    packet_no: Some(packet.packet_no),
+                    group_id: None,
+                    media_type: 0,
+                };
+                let _ = self.db.insert_message(&stored).await;
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::MessageReceived {
+                        id: msg_id,
+                        sender: packet.sender_name,
+                        sender_addr: from,
+                        content,
+                        timestamp,
+                        packet_no: packet.packet_no,
+                    })
+                    .await;
+            }
+        }
     }
 
     /// Handle an incoming GroupMsg (0x23) — group chat message.
@@ -778,6 +907,7 @@ impl EventHandler {
             read: false,
             packet_no: Some(packet.packet_no),
             group_id: Some(group.id.clone()),
+            media_type: 0,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store group message: {}", e);
@@ -832,6 +962,7 @@ impl EventHandler {
             read: true, // Our own messages are always "read".
             packet_no: Some(packet_no),
             group_id: None,
+            media_type: 0,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent message: {}", e);
@@ -901,6 +1032,7 @@ impl EventHandler {
             read: true,
             packet_no: Some(last_packet_no),
             group_id: Some(group.id.clone()),
+            media_type: 0,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent group message: {}", e);
@@ -1006,6 +1138,7 @@ impl EventHandler {
                         text: m.content,
                         timestamp: m.timestamp,
                         outgoing: m.sender == self.local_id,
+                        media_type: m.media_type,
                     })
                     .collect();
                 let _ = self
@@ -1078,6 +1211,7 @@ impl EventHandler {
             read: true,
             packet_no: Some(packet_no),
             group_id: None,
+            media_type: 0,
         };
         if let Err(e) = self.db.insert_message(&stored).await {
             warn!("Failed to store sent file message: {}", e);
@@ -1095,6 +1229,63 @@ impl EventHandler {
             .await;
 
         Ok(packet_no)
+    }
+
+    /// Send an image message to a peer.
+    ///
+    /// The image is registered in the shared [`FileRegistry`] so the peer can
+    /// pull the bytes over TCP via GetFileData. A `SendImage` packet carries
+    /// the 8-byte hex file ID in its extra field. The message is persisted
+    /// locally with `media_type = 1` and an `ImageSent` event is emitted.
+    pub async fn send_image_message(
+        &self,
+        to: SocketAddr,
+        path: PathBuf,
+    ) -> Result<(String, u32), Box<dyn std::error::Error + Send + Sync>> {
+        let offer = self.registry.register(&path).await?;
+        let file_id_hex = format!("{:08x}", offer.file_id);
+
+        info!(
+            "Sending image {} (file_id={}, {} bytes) to {}",
+            offer.filename, file_id_hex, offer.size, to
+        );
+
+        let packet_no = self.sender.send_image(to, &file_id_hex).await?;
+
+        let msg_id = Uuid::new_v4().to_string();
+        let timestamp = now_timestamp();
+        let peer_id = format!("{}:{}", to.ip(), to.port());
+        let image_path = path.to_string_lossy().to_string();
+
+        // Persist locally.
+        let stored = StoredMessage {
+            id: msg_id.clone(),
+            sender: self.local_id.clone(),
+            recipient: peer_id.clone(),
+            content: image_path.clone(),
+            timestamp,
+            read: true,
+            packet_no: Some(packet_no),
+            group_id: None,
+            media_type: 1,
+        };
+        if let Err(e) = self.db.insert_message(&stored).await {
+            warn!("Failed to store sent image message: {}", e);
+        }
+
+        // Notify UI.
+        let _ = self
+            .ui_tx
+            .send(UiEvent::ImageSent {
+                id: msg_id.clone(),
+                recipient: to,
+                image_path,
+                timestamp,
+                packet_no,
+            })
+            .await;
+
+        Ok((msg_id, packet_no))
     }
 
     /// Accept an incoming file offer: download it from the peer to our

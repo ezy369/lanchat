@@ -110,6 +110,33 @@ impl MessageSender {
         builder.build()
     }
 
+    /// Build a packet with a pre-allocated packet number.
+    ///
+    /// Used when the caller needs the packet number before the packet is built
+    /// (e.g. to return it from a send method).
+    fn build_with_no(&self, cmd: Command, cmd_flags: u32, extra: Option<&str>, no: u32) -> String {
+        let mut builder = if self.identity.use_feiq_version {
+            PacketBuilder::new_feiq(&self.identity.mac_address, self.identity.feiq_level)
+        } else {
+            PacketBuilder::new()
+        };
+
+        builder = builder
+            .sender(&self.identity.username, &self.identity.hostname)
+            .packet_no(no)
+            .command(cmd);
+
+        if cmd_flags != 0 {
+            builder = builder.flag(cmd_flags);
+        }
+
+        if let Some(data) = extra {
+            builder = builder.extra(data);
+        }
+
+        builder.build()
+    }
+
     /// Send a raw packet string to a peer address.
     async fn send_packet(&self, packet: &str, to: SocketAddr) -> Result<(), MessageError> {
         let bytes = packet.as_bytes();
@@ -301,9 +328,11 @@ impl MessageSender {
         &self,
         to: SocketAddr,
         image_id: &str,
-    ) -> Result<(), MessageError> {
-        let packet = self.build(Command::SendImage, flags::IPMSG_FILEATTACHOPT, Some(image_id));
-        self.send_packet(&packet, to).await
+    ) -> Result<u32, MessageError> {
+        let no = self.next_packet_no();
+        let packet = self.build_with_no(Command::SendImage, flags::IPMSG_FILEATTACHOPT, Some(image_id), no);
+        self.send_packet(&packet, to).await?;
+        Ok(no)
     }
 
     // ─── User List Protocol ──────────────────────────────────────────────

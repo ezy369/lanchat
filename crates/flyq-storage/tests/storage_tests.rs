@@ -21,6 +21,7 @@ fn make_msg(sender: &str, recipient: &str, content: &str, timestamp: i64, read: 
         read,
         packet_no: None,
         group_id: None,
+        media_type: 0,
     }
 }
 
@@ -590,6 +591,7 @@ fn make_group_msg(sender: &str, group_id: &str, content: &str, timestamp: i64) -
         read: false,
         packet_no: None,
         group_id: Some(group_id.to_string()),
+        media_type: 0,
     }
 }
 
