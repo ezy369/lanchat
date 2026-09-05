@@ -1034,6 +1034,9 @@ impl Render for LanChatApp {
             let folder_rt = rt.clone();
             let img_handler = handler.clone();
             let img_rt = rt.clone();
+            let ss_handler = handler.clone();
+            let ss_rt = rt.clone();
+            let ss_download_dir = self.handler.download_dir();
             chat::render_chat_panel(
                 Some(&name),
                 &messages,
@@ -1128,6 +1131,27 @@ impl Render for LanChatApp {
                         }
                     });
                 },
+                move |_, _, _| {
+                    // Screenshot: capture primary monitor → save → send as image.
+                    let handler = ss_handler.clone();
+                    let images_dir = ss_download_dir.join("images");
+                    ss_rt.spawn(async move {
+                        // Capture on a blocking thread (GDI/DXGI can block).
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::screenshot::capture_and_save(&images_dir)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(path)) => {
+                                if let Err(e) = handler.send_image_message(addr, path).await {
+                                    warn!("Failed to send screenshot to {}: {}", addr, e);
+                                }
+                            }
+                            Ok(Err(e)) => warn!("Screenshot failed: {}", e),
+                            Err(e) => warn!("Screenshot task panicked: {}", e),
+                        }
+                    });
+                },
             )
         } else if let Some(ref gid) = selected_group {
             // Group chat panel — shows group messages with a simplified header.
@@ -1162,6 +1186,7 @@ impl Render for LanChatApp {
                 None,
                 &self.input,
                 palette,
+                |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},
                 |_, _, _| {},

@@ -25,6 +25,7 @@ pub fn render_chat_panel(
     on_send_file: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_send_folder: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_send_image: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_screenshot: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let Some(name) = peer_name else {
         return empty_chat(palette);
@@ -66,6 +67,12 @@ pub fn render_chat_panel(
                         .small()
                         .label("发送图片")
                         .on_click(on_send_image),
+                )
+                .child(
+                    Button::new("screenshot-btn")
+                        .small()
+                        .label("截图")
+                        .on_click(on_screenshot),
                 )
                 .child(
                     Button::new("knock-btn")
