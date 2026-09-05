@@ -64,10 +64,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "A modern, open-source LAN messenger compatible with FeiQ / IP Messenger"
+# Used by cargo-wix as the MSI "Manufacturer".
+authors = ["LanChat contributors"]
 
 [[bin]]
 name = "lanchat"
 path = "src/main.rs"
+
+# Embeds the app icon + version metadata into lanchat.exe via the Windows SDK
+# resource compiler (rc.exe). Windows-only; the build script no-ops elsewhere.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winres = "0.1"
 
 [dependencies]
 flyq-core.workspace = true
@@ -91,3 +99,15 @@ anyhow.workspace = true
 # macOS because the Linux backend pulls GTK/libappindicator system libraries.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon = "0.24"
+
+# cargo-bundle metadata for the macOS `.app` / `.dmg` release package
+# (`cargo bundle --release` on a Mac). cargo-bundle converts the PNG icons into
+# an `.icns` for the app bundle.
+[package.metadata.bundle]
+name = "LanChat"
+identifier = "io.github.ezy369.lanchat"
+icon = ["assets/icon_256.png", "assets/icon_48.png", "assets/icon_32.png", "assets/icon_16.png"]
+category = "SocialNetworking"
+short_description = "Open-source LAN messenger (FeiQ / IP Messenger compatible)"
+long_description = "LanChat speaks the IPMsg wire protocol (UDP/TCP 2425) with FeiQ extensions: automatic peer discovery, text chat with delivery/read receipts, typing indicators, screen shake, file and folder transfer, persistent history with full-text search, presence, tray and notifications."
+osx_minimum_system_version = "10.15"

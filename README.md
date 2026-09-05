@@ -55,6 +55,29 @@ cargo test --workspace
 cargo clippy --workspace
 ```
 
+### 发布包
+
+Windows `.msi`（在本仓库根目录执行，需先安装 [cargo-wix](https://github.com/cargo-wix/cargo-wix) 与 [WiX Toolset v3](https://github.com/wixtoolset/wix3)）：
+
+```bash
+cargo install cargo-wix
+# 将 WIX 指向 WiX v3 的 bin 目录（含 candle.exe / light.exe）
+cargo wix -p lanchat --nocapture
+# 产物：target/wix/lanchat-<version>-x86_64.msi
+```
+
+安装器模板为 `wix/main.wxs`（开始菜单快捷方式、PATH 环境变量、`assets/icon.ico` 产品图标）。嵌入 exe 图标/版本信息由 `build.rs` 经 `winres` 完成，需要 Windows SDK 的 `rc.exe`；若未安装 SDK，资源步骤会被跳过（打印 warning），构建与打包仍可继续。
+
+macOS `.dmg`（需在 Mac 上执行，依赖 Xcode command line tools）：
+
+```bash
+cargo install cargo-bundle
+cargo bundle --release        # 元数据取自 Cargo.toml 的 [package.metadata.bundle]
+# 产物：target/release/bundle/dmg/LanChat_<version>_aarch64.dmg（或 x86_64）
+```
+
+`.dmg` 无法在 Windows/Linux 上构建；仓库已提供 `cargo-bundle` 所需的 `[package.metadata.bundle]` 元数据与 `assets/icon_*.png`，在 Mac 上直接运行上述命令即可。
+
 ## 使用
 
 1. 启动后左侧栏显示本机昵称与在线 peer 列表；新 peer 上线会自动出现。
