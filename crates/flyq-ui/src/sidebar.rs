@@ -3,9 +3,10 @@
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
 use rust_i18n::t;
-use gpui::{div, px, white, AnyElement, App, ClickEvent, FontWeight, Window};
-use gpui_component::button::Button;
-use gpui_component::{h_flex, v_flex, Sizable};
+use gpui::{div, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputState};
+use gpui_component::{h_flex, v_flex, InteractiveElementExt, Sizable};
 
 use crate::app::{status_color, Palette};
 
@@ -174,16 +175,75 @@ pub fn render_sidebar(
 ///
 /// The `on_select` callback is attached as the row's click handler; it is built
 /// by the caller (which has access to the app entity) and merely wired up here.
+/// When `is_editing` is true, the row shows an inline remark editor instead of
+/// the normal display. `remark` overrides the peer's broadcast name when present.
 pub fn peer_row(
     peer: &PeerInfo,
     selected: bool,
     typing: Option<&str>,
+    remark: Option<&str>,
     palette: Palette,
     on_select: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_edit_remark: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    remark_input: &Entity<InputState>,
+    is_editing: bool,
+    on_save_remark: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_cancel_remark: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let dot_color = status_color(peer.status, peer.online, palette);
+
+    // Editing mode: show inline input with save/cancel buttons.
+    if is_editing {
+        return div()
+            .id(peer.peer_id())
+            .w_full()
+            .px(px(12.0))
+            .py(px(8.0))
+            .bg(palette.accent)
+            .child(
+                v_flex()
+                    .w_full()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.muted_foreground)
+                            .child(t!("remark.set_remark").to_string()),
+                    )
+                    .child(
+                        div().w_full().child(
+                            Input::new(remark_input).small(),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_end()
+                            .gap(px(6.0))
+                            .child(
+                                Button::new("remark-cancel")
+                                    .xsmall()
+                                    .label(&t!("remark.cancel").to_string())
+                                    .on_click(on_cancel_remark),
+                            )
+                            .child(
+                                Button::new("remark-save")
+                                    .primary()
+                                    .xsmall()
+                                    .label(&t!("remark.save").to_string())
+                                    .on_click(on_save_remark),
+                            ),
+                    ),
+            )
+            .into_any_element();
+    }
+
+    let display_name = remark.unwrap_or(&peer.name).to_string();
     let subtitle = if typing.is_some() {
         t!("sidebar.typing").to_string()
+    } else if remark.is_some() {
+        // Show the real name as subtitle when a remark is set.
+        peer.name.clone()
     } else {
         peer.host.clone()
     };
@@ -191,6 +251,7 @@ pub fn peer_row(
     let mut row = div()
         .id(peer.peer_id())
         .on_click(on_select)
+        .on_double_click(on_edit_remark)
         .cursor_pointer()
         .w_full()
         .px(px(12.0))
@@ -222,7 +283,7 @@ pub fn peer_row(
                         div()
                             .text_sm()
                             .text_color(palette.foreground)
-                            .child(peer.name.clone()),
+                            .child(display_name),
                     )
                     .child(
                         div()

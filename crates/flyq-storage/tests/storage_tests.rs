@@ -318,6 +318,7 @@ async fn test_get_conversations() {
         host: "alice-pc".to_string(),
         group: Some("dev".to_string()),
         last_seen: 1000,
+        remark_name: None,
     };
     let peer2 = StoredPeer {
         addr: "peer2".to_string(),
@@ -325,6 +326,7 @@ async fn test_get_conversations() {
         host: "bob-pc".to_string(),
         group: None,
         last_seen: 1001,
+        remark_name: None,
     };
     db.upsert_peer(&peer1).await.unwrap();
     db.upsert_peer(&peer2).await.unwrap();
@@ -403,6 +405,7 @@ async fn test_peer_crud() {
         host: "test-host".to_string(),
         group: Some("engineering".to_string()),
         last_seen: 1000,
+        remark_name: None,
     };
 
     db.upsert_peer(&peer).await.unwrap();
@@ -434,6 +437,48 @@ async fn test_peer_crud() {
     assert!(deleted);
     let peers = db.get_peers().await.unwrap();
     assert!(peers.is_empty());
+}
+
+#[tokio::test]
+async fn test_remark_name_roundtrip() {
+    let db = setup_db().await;
+
+    let peer = StoredPeer {
+        addr: "192.168.1.50:2425".to_string(),
+        name: "Alice".to_string(),
+        host: "alice-pc".to_string(),
+        group: None,
+        last_seen: 1000,
+        remark_name: None,
+    };
+    db.upsert_peer(&peer).await.unwrap();
+
+    // Initially no remark.
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].remark_name, None);
+
+    // Set a remark name.
+    db.set_remark_name("192.168.1.50:2425", Some("同事小王"))
+        .await
+        .unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].remark_name.as_deref(), Some("同事小王"));
+
+    // Upsert should preserve the remark (not overwrite it).
+    let updated = StoredPeer {
+        name: "Alice2".to_string(),
+        last_seen: 2000,
+        ..peer.clone()
+    };
+    db.upsert_peer(&updated).await.unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].name, "Alice2");
+    assert_eq!(peers[0].remark_name.as_deref(), Some("同事小王"));
+
+    // Clear the remark.
+    db.set_remark_name("192.168.1.50:2425", None).await.unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].remark_name, None);
 }
 
 // ─── FTS Index Rebuild Test ─────────────────────────────────────────────────

@@ -547,12 +547,15 @@ impl Database {
     // ─── Peer Management ────────────────────────────────────────────────────
 
     /// Insert or update a peer record.
+    ///
+    /// On conflict (peer already exists), updates name/host/grp/last_seen but
+    /// preserves any user-set `remark_name`.
     pub async fn upsert_peer(&self, peer: &StoredPeer) -> Result<(), DbError> {
         let mut stmt = self
             .conn
             .prepare(
-                "INSERT INTO peers (addr, name, host, grp, last_seen)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO peers (addr, name, host, grp, last_seen, remark_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(addr) DO UPDATE SET
                     name = ?2, host = ?3, grp = ?4, last_seen = ?5",
             )
@@ -563,6 +566,7 @@ impl Database {
             peer.host.as_str(),
             peer.group.as_deref().unwrap_or(""),
             peer.last_seen,
+            peer.remark_name.as_deref(),
         ))
         .await?;
         Ok(())
@@ -572,7 +576,7 @@ impl Database {
     pub async fn get_peers(&self) -> Result<Vec<StoredPeer>, DbError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT addr, name, host, grp, last_seen FROM peers ORDER BY name")
+            .prepare("SELECT addr, name, host, grp, last_seen, remark_name FROM peers ORDER BY name")
             .await?;
 
         let mut rows = stmt.query(()).await?;
@@ -580,16 +584,33 @@ impl Database {
 
         while let Some(row) = rows.next().await? {
             let grp: String = row.get(3)?;
+            let remark: Option<String> = row.get(5)?;
             peers.push(StoredPeer {
                 addr: row.get::<String>(0)?,
                 name: row.get::<String>(1)?,
                 host: row.get::<String>(2)?,
                 group: if grp.is_empty() { None } else { Some(grp) },
                 last_seen: row.get::<i64>(4)?,
+                remark_name: remark.filter(|s| !s.is_empty()),
             });
         }
 
         Ok(peers)
+    }
+
+    /// Set (or clear) a user-defined remark name for a peer.
+    ///
+    /// Pass `None` or an empty string to clear the alias and revert to the
+    /// peer's broadcast name.
+    pub async fn set_remark_name(&self, addr: &str, remark: Option<&str>) -> Result<(), DbError> {
+        let remark_value = remark.filter(|s| !s.is_empty());
+        self.conn
+            .execute(
+                "UPDATE peers SET remark_name = ?1 WHERE addr = ?2",
+                (remark_value, addr),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Delete a peer by address.

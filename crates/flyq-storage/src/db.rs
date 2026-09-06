@@ -124,6 +124,14 @@ impl Database {
             )
             .await;
 
+        // M9: add remark_name column for user-set contact aliases.
+        // NULL means "use the peer's broadcast name"; non-NULL overrides it
+        // in the sidebar and conversation headers.
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE peers ADD COLUMN remark_name TEXT;")
+            .await;
+
         info!("Database migrations completed");
         Ok(())
     }

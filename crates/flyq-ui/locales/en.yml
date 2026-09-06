@@ -66,6 +66,11 @@ status:
   busy: "Busy"
   offline: "Offline"
 
+remark:
+  set_remark: "Set remark"
+  save: "Save"
+  cancel: "Cancel"
+
 tray:
   show_window: "Show window"
   quit: "Quit"

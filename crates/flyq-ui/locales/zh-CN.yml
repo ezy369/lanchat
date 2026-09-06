@@ -66,6 +66,11 @@ status:
   busy: "忙碌"
   offline: "离线"
 
+remark:
+  set_remark: "设置备注名"
+  save: "保存"
+  cancel: "取消"
+
 tray:
   show_window: "显示主窗口"
   quit: "退出"

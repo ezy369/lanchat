@@ -211,6 +211,12 @@ pub struct LanChatApp {
     /// Groups whose history has been loaded from the database.
     #[allow(dead_code)]
     group_history_loaded: HashSet<String>,
+    /// User-set remark names for peers, keyed by address.
+    remark_names: HashMap<SocketAddr, String>,
+    /// Address of the peer whose remark is currently being edited (if any).
+    remark_editing: Option<SocketAddr>,
+    /// Input state for the inline remark editor.
+    remark_input: Entity<InputState>,
 }
 
 impl LanChatApp {
@@ -250,6 +256,7 @@ impl LanChatApp {
         });
         let initial_language = config.language.clone();
         let initial_sound = config.sound_enabled;
+        let remark_input = cx.new(|cx| InputState::new(window, cx));
 
         // Enter sends the message; other input events are ignored for now.
         cx.subscribe_in(
@@ -262,6 +269,18 @@ impl LanChatApp {
                     }
                 }
                 _ => {}
+            },
+        )
+        .detach();
+
+        // Enter in the remark input saves the remark.
+        cx.subscribe_in(
+            &remark_input,
+            window,
+            |this: &mut Self, _input, event: &InputEvent, _window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_remark(cx);
+                }
             },
         )
         .detach();
@@ -294,6 +313,9 @@ impl LanChatApp {
             group_conversations: HashMap::new(),
             selected_group: None,
             group_history_loaded: HashSet::new(),
+            remark_names: HashMap::new(),
+            remark_editing: None,
+            remark_input,
         };
 
         // Consume UI events on GPUI's executor. `tokio::sync::mpsc::recv` is
@@ -658,6 +680,9 @@ impl LanChatApp {
                     image_path: Some(PathBuf::from(image_path)),
                 });
             }
+            UiEvent::RemarkLoaded { addr, remark } => {
+                self.remark_names.insert(addr, remark);
+            }
         }
         cx.notify();
     }
@@ -747,7 +772,14 @@ impl LanChatApp {
     }
 
     /// Resolve the display name for a peer address.
+    ///
+    /// Prefers the user-set remark name over the peer's broadcast name.
     fn peer_name(&self, addr: &SocketAddr) -> String {
+        if let Some(remark) = self.remark_names.get(addr) {
+            if !remark.is_empty() {
+                return remark.clone();
+            }
+        }
         self.names
             .get(addr)
             .cloned()
@@ -864,6 +896,54 @@ impl LanChatApp {
     /// Close the settings modal without saving.
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = false;
+        cx.notify();
+    }
+
+    /// Begin editing a peer's remark name.
+    fn start_edit_remark(&mut self, addr: SocketAddr, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .remark_names
+            .get(&addr)
+            .cloned()
+            .unwrap_or_default();
+        self.remark_input.update(cx, |i, cx| {
+            i.set_value(&current, window, cx);
+        });
+        self.remark_editing = Some(addr);
+        cx.notify();
+    }
+
+    /// Save the remark being edited and persist it to the database.
+    fn save_remark(&mut self, cx: &mut Context<Self>) {
+        if let Some(addr) = self.remark_editing.take() {
+            let remark = self.remark_input.read(cx).value().to_string();
+            let trimmed = remark.trim().to_string();
+
+            if trimmed.is_empty() {
+                self.remark_names.remove(&addr);
+            } else {
+                self.remark_names.insert(addr, trimmed.clone());
+            }
+
+            let handler = self.handler.clone();
+            let peer_id = format!("{}:{}", addr.ip(), addr.port());
+            let remark_opt = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            };
+            self.rt.spawn(async move {
+                handler
+                    .set_remark_name(&peer_id, remark_opt.as_deref())
+                    .await;
+            });
+        }
+        cx.notify();
+    }
+
+    /// Cancel the in-progress remark edit.
+    fn cancel_edit_remark(&mut self, cx: &mut Context<Self>) {
+        self.remark_editing = None;
         cx.notify();
     }
 
@@ -992,16 +1072,34 @@ impl Render for LanChatApp {
             let addr = peer.socket_addr();
             let is_selected = Some(addr) == selected;
             let typing = self.typing.get(&addr).cloned();
+            let remark = self.remark_names.get(&addr).cloned();
+            let is_editing = self.remark_editing == Some(addr);
             let row_this = this.clone();
             let row_input = input_entity.clone();
+            let edit_this = this.clone();
+            let save_this = this.clone();
+            let cancel_this = this.clone();
+            let remark_input_entity = self.remark_input.clone();
             let row = sidebar::peer_row(
                 peer,
                 is_selected,
                 typing.as_deref(),
+                remark.as_deref(),
                 palette,
                 move |_, window, cx| {
                     row_this.update(cx, |app, cx| app.select_peer(addr, cx));
                     row_input.update(cx, |i, cx| i.focus(window, cx));
+                },
+                move |_, window, cx| {
+                    edit_this.update(cx, |app, cx| app.start_edit_remark(addr, window, cx));
+                },
+                &remark_input_entity,
+                is_editing,
+                move |_, _, cx| {
+                    save_this.update(cx, |app, cx| app.save_remark(cx));
+                },
+                move |_, _, cx| {
+                    cancel_this.update(cx, |app, cx| app.cancel_edit_remark(cx));
                 },
             );
             rows.push(row);

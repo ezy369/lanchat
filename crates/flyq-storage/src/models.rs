@@ -33,6 +33,8 @@ pub struct StoredPeer {
     pub host: String,
     pub group: Option<String>,
     pub last_seen: i64,
+    /// User-set display alias; `None` means use the peer's broadcast `name`.
+    pub remark_name: Option<String>,
 }
 
 /// Pagination request parameters.

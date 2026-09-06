@@ -176,6 +176,11 @@ pub enum UiEvent {
         timestamp: i64,
         packet_no: u32,
     },
+    /// A peer's stored remark name was loaded from the database.
+    RemarkLoaded {
+        addr: SocketAddr,
+        remark: String,
+    },
 }
 
 /// Application event handler that bridges network events to storage and UI.
@@ -278,13 +283,29 @@ impl EventHandler {
             host: peer.host.clone(),
             group: peer.group.clone(),
             last_seen: now_timestamp(),
+            remark_name: None,
         };
         if let Err(e) = self.db.upsert_peer(&stored).await {
             warn!("Failed to persist peer {}: {}", peer.name, e);
         }
 
+        // Save addr before peer is consumed by PeerOnline.
+        let peer_addr = peer.socket_addr();
+        let peer_id = peer.peer_id();
+
         // Notify UI.
         let _ = self.ui_tx.send(UiEvent::PeerOnline(peer)).await;
+
+        // If the peer has a stored remark name, emit it so the UI can display it.
+        if let Some(remark) = self.get_remark_name(&peer_id).await {
+            let _ = self
+                .ui_tx
+                .send(UiEvent::RemarkLoaded {
+                    addr: peer_addr,
+                    remark,
+                })
+                .await;
+        }
     }
 
     /// Handle a peer going offline.
@@ -1102,6 +1123,26 @@ impl EventHandler {
     pub async fn request_peer_list(&self) {
         if let Err(e) = self.sender.send_br_is_get_list().await {
             warn!("Failed to broadcast BrIsGetList: {}", e);
+        }
+    }
+
+    /// Look up the user-set remark name for a peer.
+    ///
+    /// Returns `None` if the peer has no remark or is not yet stored.
+    pub async fn get_remark_name(&self, addr: &str) -> Option<String> {
+        self.db
+            .get_peers()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|p| p.addr == addr)
+            .and_then(|p| p.remark_name)
+    }
+
+    /// Set (or clear) the user-defined remark name for a peer and persist it.
+    pub async fn set_remark_name(&self, addr: &str, remark: Option<&str>) {
+        if let Err(e) = self.db.set_remark_name(addr, remark).await {
+            warn!("Failed to set remark for {}: {}", addr, e);
         }
     }
 
