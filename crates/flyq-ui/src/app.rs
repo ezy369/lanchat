@@ -1023,6 +1023,41 @@ impl LanChatApp {
         self.settings_open = false;
         cx.notify();
     }
+
+    /// Trigger a screenshot overlay from an external source (e.g. global hotkey).
+    ///
+    /// Only activates when a peer is selected. Captures the screen to a temp
+    /// file and opens the crop overlay.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn trigger_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(addr) = self.selected else {
+            tracing::warn!("Screenshot hotkey pressed but no peer selected");
+            return;
+        };
+        let Some(bounds) = cx.primary_display().map(|d| d.bounds()) else {
+            tracing::warn!("Cannot determine display bounds for screenshot overlay");
+            return;
+        };
+        let temp_dir = self.handler.download_dir().join("temp");
+        let images_dir = self.handler.download_dir().join("images");
+        match crate::screenshot::capture_to_temp(&temp_dir) {
+            Ok(source) => {
+                if let Err(e) = crate::overlay::ScreenshotOverlay::open(
+                    source,
+                    images_dir,
+                    self.rt.clone(),
+                    self.handler.clone(),
+                    addr,
+                    bounds,
+                    window,
+                    cx,
+                ) {
+                    tracing::warn!("Failed to open screenshot overlay: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Screenshot capture failed: {}", e),
+        }
+    }
 }
 
 impl Render for LanChatApp {

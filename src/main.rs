@@ -23,6 +23,10 @@ rust_i18n::i18n!("locales");
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray;
 
+// Global hotkeys (Ctrl+Shift+A for screenshot) on the same platforms as tray.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod hotkey;
+
 /// Relative path of the embedded libSQL database.
 const DB_PATH: &str = "lanchat.db";
 
@@ -151,6 +155,13 @@ fn main() {
             rust_i18n::set_locale(&app_config.language);
 
             cx.spawn(async move |cx| {
+                // Share the LanChatApp entity handle with the hotkey module.
+                // The builder closure runs synchronously inside open_window, so
+                // the lock is always populated before we read it below.
+                let app_entity: std::sync::Arc<std::sync::Mutex<Option<gpui::Entity<LanChatApp>>>> =
+                    std::sync::Arc::new(std::sync::Mutex::new(None));
+                let app_entity_clone = app_entity.clone();
+
                 let window = cx
                     .open_window(
                         WindowOptions {
@@ -168,6 +179,7 @@ fn main() {
                             let view = cx.new(|cx| {
                                 LanChatApp::new(window, cx, local_name, app_config, handler, ui_rx)
                             });
+                            *app_entity_clone.lock().unwrap() = Some(view.clone());
                             cx.new(|cx| Root::new(view, window, cx))
                         },
                     )
@@ -178,6 +190,12 @@ fn main() {
                 // for both creation and message pumping.
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray::run_tray(cx, window);
+
+                // Register global hotkeys (Ctrl+Shift+A for screenshot).
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                if let Some(app) = app_entity.lock().unwrap().take() {
+                    hotkey::run_hotkeys(cx, window, app);
+                }
                 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 let _ = window;
             })

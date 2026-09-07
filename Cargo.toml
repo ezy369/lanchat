@@ -104,6 +104,7 @@ rust-i18n.workspace = true
 # macOS because the Linux backend pulls GTK/libappindicator system libraries.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tray-icon = "0.24"
+global-hotkey = "0.8"
 
 # cargo-bundle metadata for the macOS `.app` / `.dmg` release package
 # (`cargo bundle --release` on a Mac). cargo-bundle converts the PNG icons into
