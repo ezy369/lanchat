@@ -74,6 +74,9 @@ remark:
 overlay:
   hint: "拖拽选择区域 · Enter 确认 · Esc 取消"
   hint_adjust: "拖拽边缘调整选区 · Enter 确认 · Esc/右键 取消"
+  send: "发送"
+  save: "保存"
+  cancel: "取消"
 
 tray:
   show_window: "显示主窗口"

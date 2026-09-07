@@ -74,6 +74,9 @@ remark:
 overlay:
   hint: "Drag to select · Enter to confirm · Esc to cancel"
   hint_adjust: "Drag edges to adjust · Enter to confirm · Esc/right-click to cancel"
+  send: "Send"
+  save: "Save"
+  cancel: "Cancel"
 
 tray:
   show_window: "Show window"

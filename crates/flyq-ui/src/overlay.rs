@@ -29,6 +29,13 @@ const EDGE_THRESHOLD: f32 = 8.0;
 /// Visual size of corner handle squares.
 const CORNER_SIZE: f32 = 10.0;
 
+/// Toolbar dimensions for the floating action buttons.
+const TOOLBAR_W: f32 = 200.0;
+const TOOLBAR_H: f32 = 32.0;
+const TOOLBAR_GAP: f32 = 8.0;
+const BTN_W: f32 = 56.0;
+const BTN_H: f32 = 28.0;
+
 /// What the user is currently dragging.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum DragMode {
@@ -71,6 +78,9 @@ pub struct ScreenshotOverlay {
     dragging: bool,
     /// Current drag mode.
     drag_mode: DragMode,
+    /// Set by toolbar button clicks to prevent the overlay's mouse-down
+    /// handler from starting a new selection.
+    just_clicked: bool,
 }
 
 impl ScreenshotOverlay {
@@ -92,6 +102,7 @@ impl ScreenshotOverlay {
             end: None,
             dragging: false,
             drag_mode: DragMode::NewSelection,
+            just_clicked: false,
         }
     }
 
@@ -354,6 +365,22 @@ impl ScreenshotOverlay {
     fn cancel(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         window.remove_window();
     }
+
+    /// Crop and save the screenshot locally (without sending to a peer).
+    /// Closes the window after saving.
+    fn save_to_disk(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some((x, y, w, h)) = self.selection_rect() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let dest = self.images_dir.join(format!("screenshot_crop_{}.png", ts));
+            if let Err(e) = crate::screenshot::crop_image(&self.source, x, y, w, h, &dest) {
+                warn!("Failed to save cropped screenshot: {}", e);
+            }
+        }
+        window.remove_window();
+    }
 }
 
 impl Render for ScreenshotOverlay {
@@ -480,6 +507,105 @@ impl Render for ScreenshotOverlay {
             None
         };
 
+        // ── Floating toolbar (Send / Save / Cancel) ──
+        let toolbar_el = if !self.dragging {
+            sel.map(|(sx, sy, sw, sh)| {
+                let ex = sx as f32 + sw as f32;
+                let ey = sy as f32 + sh as f32;
+                let tx = (ex - TOOLBAR_W).max(0.0);
+                let ty = ey + TOOLBAR_GAP;
+
+                div()
+                    .absolute()
+                    .left(px(tx))
+                    .top(px(ty))
+                    .w(px(TOOLBAR_W))
+                    .h(px(TOOLBAR_H))
+                    .bg(rgba(0x1a1a1aDD))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.0))
+                    // Consume mouse events on the toolbar to prevent the
+                    // overlay below from starting a new selection or
+                    // triggering cancel.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _: &MouseDownEvent, _window, cx| {
+                            this.just_clicked = true;
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this: &mut Self, _: &MouseDownEvent, _window, cx| {
+                            this.just_clicked = true;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .id("tb-send")
+                            .w(px(BTN_W))
+                            .h(px(BTN_H))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .bg(rgba(0x4488FFEE))
+                            .text_color(rgba(0xFFFFFFFF))
+                            .text_size(px(13.0))
+                            .child(t!("overlay.send").to_string())
+                            .on_click(cx.listener(
+                                |this: &mut Self, _, window, cx| {
+                                    this.confirm(window, cx);
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("tb-save")
+                            .w(px(BTN_W))
+                            .h(px(BTN_H))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .bg(rgba(0x444444FF))
+                            .text_color(rgba(0xFFFFFFFF))
+                            .text_size(px(13.0))
+                            .child(t!("overlay.save").to_string())
+                            .on_click(cx.listener(
+                                |this: &mut Self, _, window, cx| {
+                                    this.save_to_disk(window, cx);
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("tb-cancel")
+                            .w(px(BTN_W))
+                            .h(px(BTN_H))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.0))
+                            .bg(rgba(0x444444FF))
+                            .text_color(rgba(0xFFFFFFFF))
+                            .text_size(px(13.0))
+                            .child(t!("overlay.cancel").to_string())
+                            .on_click(cx.listener(
+                                |this: &mut Self, _, window, cx| {
+                                    this.cancel(window, cx);
+                                },
+                            )),
+                    )
+            })
+        } else {
+            None
+        };
+
         // ── Main layout ──
         div()
             .size_full()
@@ -510,6 +636,8 @@ impl Render for ScreenshotOverlay {
             .children(size_label)
             // Hint text.
             .child(hint)
+            // Floating toolbar (visible when selection exists and not dragging).
+            .children(toolbar_el)
             // Event-capturing overlay (covers the full window).
             .child(
                 div()
@@ -522,6 +650,12 @@ impl Render for ScreenshotOverlay {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                            // Skip if a toolbar button was just clicked.
+                            if this.just_clicked {
+                                this.just_clicked = false;
+                                return;
+                            }
+
                             let mode = this
                                 .hit_test(event.position.x.as_f32(), event.position.y.as_f32())
                                 .unwrap_or(DragMode::NewSelection);
@@ -540,7 +674,10 @@ impl Render for ScreenshotOverlay {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this: &mut Self, _event: &MouseDownEvent, window, cx| {
-                            this.cancel(window, cx);
+                            if !this.just_clicked {
+                                this.cancel(window, cx);
+                            }
+                            this.just_clicked = false;
                         }),
                     )
                     // Mouse move: update drag or show hover feedback.
