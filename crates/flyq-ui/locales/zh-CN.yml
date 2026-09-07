@@ -51,6 +51,10 @@ settings:
   cancel: "取消"
   save: "保存"
   sound_enabled: "消息提醒音"
+  theme: "主题"
+  theme_system: "跟随系统"
+  theme_light: "亮色"
+  theme_dark: "暗色"
 
 notify:
   app_name: "LanChat"

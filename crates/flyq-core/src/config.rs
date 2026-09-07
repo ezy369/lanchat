@@ -22,6 +22,12 @@ pub const SUPPORTED_LOCALES: &[&str] = &["zh-CN", "en"];
 /// Default UI locale.
 pub const DEFAULT_LOCALE: &str = "zh-CN";
 
+/// Supported theme mode values.
+pub const SUPPORTED_THEME_MODES: &[&str] = &["system", "light", "dark"];
+
+/// Default theme mode (follows OS appearance).
+pub const DEFAULT_THEME_MODE: &str = "system";
+
 /// User-adjustable application settings, persisted as TOML.
 ///
 /// `#[serde(default)]` makes the format forward/backward compatible: a config
@@ -42,6 +48,8 @@ pub struct AppConfig {
     pub language: String,
     /// Whether to play a sound when a notification is raised.
     pub sound_enabled: bool,
+    /// Theme mode: "system" (follow OS), "light", or "dark".
+    pub theme_mode: String,
 }
 
 impl Default for AppConfig {
@@ -53,6 +61,7 @@ impl Default for AppConfig {
             status: UserStatus::Online,
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         }
     }
 }
@@ -136,6 +145,11 @@ impl AppConfig {
 
         if !SUPPORTED_LOCALES.contains(&self.language.as_str()) {
             self.language = DEFAULT_LOCALE.to_string();
+            changed = true;
+        }
+
+        if !SUPPORTED_THEME_MODES.contains(&self.theme_mode.as_str()) {
+            self.theme_mode = DEFAULT_THEME_MODE.to_string();
             changed = true;
         }
 
@@ -224,6 +238,7 @@ mod tests {
             status: UserStatus::Away,
             language: "en".to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         cfg.save_to(&path).expect("save should succeed");
 
@@ -281,6 +296,7 @@ mod tests {
             status: UserStatus::Online,
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -298,6 +314,7 @@ mod tests {
             status: UserStatus::Online,
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -313,6 +330,7 @@ mod tests {
             status: UserStatus::Online,
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         assert!(!cfg.normalize());
     }
@@ -332,6 +350,7 @@ mod tests {
             status: UserStatus::Online,
             language: "ja-JP".to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         assert!(cfg.normalize());
         assert_eq!(cfg.language, DEFAULT_LOCALE);
@@ -344,8 +363,38 @@ mod tests {
             status: UserStatus::Online,
             language: "en".to_string(),
             sound_enabled: true,
+            theme_mode: DEFAULT_THEME_MODE.to_string(),
         };
         assert!(!cfg2.normalize());
         assert_eq!(cfg2.language, "en");
+    }
+
+    #[test]
+    fn normalize_should_clamp_unsupported_theme_mode() {
+        let mut cfg = AppConfig {
+            nickname: "Alice".to_string(),
+            download_dir: PathBuf::from("/d"),
+            port: 2425,
+            status: UserStatus::Online,
+            language: DEFAULT_LOCALE.to_string(),
+            sound_enabled: true,
+            theme_mode: "neon".to_string(),
+        };
+        assert!(cfg.normalize());
+        assert_eq!(cfg.theme_mode, DEFAULT_THEME_MODE);
+
+        // Valid values should pass through unchanged.
+        for mode in SUPPORTED_THEME_MODES {
+            let mut c = AppConfig {
+                theme_mode: mode.to_string(),
+                ..AppConfig::default()
+            };
+            let changed = c.normalize();
+            // Only report change if the mode differs from default
+            if *mode == DEFAULT_THEME_MODE {
+                assert!(!changed, "default mode should not trigger change");
+            }
+            assert_eq!(c.theme_mode, *mode);
+        }
     }
 }

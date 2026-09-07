@@ -21,7 +21,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable};
+use gpui_component::{h_flex, v_flex, ActiveTheme, Root, Sizable, Theme, ThemeMode};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -202,6 +202,8 @@ pub struct LanChatApp {
     settings_language: String,
     /// Settings form: sound enabled toggle.
     settings_sound_enabled: bool,
+    /// Settings form: theme mode ("system", "light", "dark").
+    settings_theme_mode: String,
     /// Known chat groups.
     groups: Vec<flyq_core::Group>,
     /// Group message history keyed by group_id.
@@ -256,6 +258,7 @@ impl LanChatApp {
         });
         let initial_language = config.language.clone();
         let initial_sound = config.sound_enabled;
+        let initial_theme_mode = config.theme_mode.clone();
         let remark_input = cx.new(|cx| InputState::new(window, cx));
 
         // Enter sends the message; other input events are ignored for now.
@@ -309,6 +312,7 @@ impl LanChatApp {
             settings_port,
             settings_language: initial_language,
             settings_sound_enabled: initial_sound,
+            settings_theme_mode: initial_theme_mode,
             groups: Vec::new(),
             group_conversations: HashMap::new(),
             selected_group: None,
@@ -890,6 +894,7 @@ impl LanChatApp {
         self.settings_open = true;
         self.settings_language = self.config.language.clone();
         self.settings_sound_enabled = self.config.sound_enabled;
+        self.settings_theme_mode = self.config.theme_mode.clone();
         cx.notify();
     }
 
@@ -993,6 +998,7 @@ impl LanChatApp {
             status: self.config.status,
             language: self.settings_language.clone(),
             sound_enabled: self.settings_sound_enabled,
+            theme_mode: self.settings_theme_mode.clone(),
         };
         config.normalize();
 
@@ -1007,6 +1013,21 @@ impl LanChatApp {
         // Apply locale change live so the UI updates immediately.
         if config.language != self.config.language {
             rust_i18n::set_locale(&config.language);
+        }
+
+        // Apply theme change live.
+        if config.theme_mode != self.config.theme_mode {
+            let mode = match config.theme_mode.as_str() {
+                "dark" => ThemeMode::Dark,
+                "light" => ThemeMode::Light,
+                _ => ThemeMode::Light, // "system" resolved at startup
+            };
+            if config.theme_mode == "system" {
+                Theme::sync_system_appearance(None, cx);
+            } else {
+                Theme::change(mode, None, cx);
+            }
+            cx.refresh_windows();
         }
 
         // Persist to disk off the UI thread.
@@ -1656,8 +1677,10 @@ impl Render for LanChatApp {
             let cancel_this = this.clone();
             let lang_this = this.clone();
             let sound_this = this.clone();
+            let theme_this = this.clone();
             let current_lang = self.settings_language.clone();
             let current_sound = self.settings_sound_enabled;
+            let current_theme = self.settings_theme_mode.clone();
             let on_lang_change: std::sync::Arc<dyn Fn(&str, &mut App) + 'static> = std::sync::Arc::new(move |lang: &str, cx: &mut App| {
                 lang_this.update(cx, |app, cx| {
                     app.settings_language = lang.to_string();
@@ -1670,12 +1693,19 @@ impl Render for LanChatApp {
                     cx.notify();
                 });
             };
+            let on_theme_change: std::sync::Arc<dyn Fn(&str, &mut App) + 'static> = std::sync::Arc::new(move |mode: &str, cx: &mut App| {
+                theme_this.update(cx, |app, cx| {
+                    app.settings_theme_mode = mode.to_string();
+                    cx.notify();
+                });
+            });
             let modal = settings::render_settings_modal(
                 &self.settings_nickname,
                 &self.settings_download,
                 &self.settings_port,
                 &current_lang,
                 current_sound,
+                &current_theme,
                 palette,
                 move |_, _, cx| {
                     save_this.update(cx, |app, cx| app.save_settings(cx));
@@ -1685,6 +1715,7 @@ impl Render for LanChatApp {
                 },
                 on_lang_change,
                 on_sound_toggle,
+                on_theme_change,
             );
             root = root.child(modal);
         }

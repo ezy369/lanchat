@@ -51,6 +51,10 @@ settings:
   cancel: "Cancel"
   save: "Save"
   sound_enabled: "Notification sound"
+  theme: "Theme"
+  theme_system: "System"
+  theme_light: "Light"
+  theme_dark: "Dark"
 
 notify:
   app_name: "LanChat"

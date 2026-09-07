@@ -11,7 +11,7 @@ use flyq_ui::LanChatApp;
 use flyq_ui::tokio_runtime;
 use gpui::prelude::*;
 use gpui::{Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_component::Root;
+use gpui_component::{Root, Theme, ThemeMode};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
@@ -153,6 +153,13 @@ fn main() {
 
             // Apply persisted locale before any UI renders.
             rust_i18n::set_locale(&app_config.language);
+
+            // Apply persisted theme mode before any UI renders.
+            match app_config.theme_mode.as_str() {
+                "dark" => Theme::change(ThemeMode::Dark, None, cx),
+                "light" => Theme::change(ThemeMode::Light, None, cx),
+                _ => Theme::sync_system_appearance(None, cx),
+            }
 
             cx.spawn(async move |cx| {
                 // Share the LanChatApp entity handle with the hotkey module.

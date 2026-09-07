@@ -7,7 +7,7 @@
 //! Save/Cancel actions are supplied by the caller so this module stays a pure
 //! render function.
 
-use flyq_core::SUPPORTED_LOCALES;
+use flyq_core::{SUPPORTED_LOCALES, SUPPORTED_THEME_MODES};
 use gpui::prelude::*;
 use gpui::{div, hsla, px, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
 use gpui_component::button::{Button, ButtonVariants};
@@ -27,6 +27,16 @@ fn locale_label(id: &str) -> &'static str {
     }
 }
 
+/// Display label for a theme mode identifier.
+fn theme_label_text(mode: &str) -> String {
+    match mode {
+        "system" => t!("settings.theme_system").to_string(),
+        "light" => t!("settings.theme_light").to_string(),
+        "dark" => t!("settings.theme_dark").to_string(),
+        _ => mode.to_string(),
+    }
+}
+
 /// Render the settings modal as a full-window overlay.
 ///
 /// The returned element is absolutely positioned and covers the whole window,
@@ -38,11 +48,13 @@ pub fn render_settings_modal(
     port: &Entity<InputState>,
     selected_language: &str,
     sound_enabled: bool,
+    selected_theme: &str,
     palette: Palette,
     on_save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_language_change: Arc<dyn Fn(&str, &mut App) + 'static>,
     on_sound_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_theme_change: Arc<dyn Fn(&str, &mut App) + 'static>,
 ) -> AnyElement {
     // Build the language toggle row.
     let lang_label = div()
@@ -59,6 +71,36 @@ pub fn render_settings_modal(
         lang_buttons = lang_buttons.child(
             div()
                 .id(format!("lang-{}", locale_id))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_sm()
+                .text_color(if is_selected { palette.background } else { palette.foreground })
+                .bg(if is_selected { palette.primary } else { palette.muted })
+                .hover(|s| if is_selected { s } else { s.bg(palette.accent) })
+                .child(label.to_string())
+                .on_click(move |_, _, cx| {
+                    on_change(id_str, cx);
+                }),
+        );
+    }
+
+    // Build the theme toggle row.
+    let theme_label = div()
+        .text_xs()
+        .text_color(palette.muted_foreground)
+        .child(t!("settings.theme").to_string());
+
+    let mut theme_buttons = h_flex().gap(px(6.0));
+    for mode_id in SUPPORTED_THEME_MODES {
+        let is_selected = *mode_id == selected_theme;
+        let label = theme_label_text(mode_id);
+        let on_change = on_theme_change.clone();
+        let id_str: &'static str = mode_id;
+        theme_buttons = theme_buttons.child(
+            div()
+                .id(format!("theme-{}", mode_id))
                 .px(px(12.0))
                 .py(px(6.0))
                 .rounded(px(6.0))
@@ -99,6 +141,13 @@ pub fn render_settings_modal(
                 .gap(px(4.0))
                 .child(lang_label)
                 .child(lang_buttons),
+        )
+        .child(
+            v_flex()
+                .w_full()
+                .gap(px(4.0))
+                .child(theme_label)
+                .child(theme_buttons),
         )
         .child(
             h_flex()
