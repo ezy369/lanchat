@@ -61,6 +61,14 @@ xcap = "0.5"
 image = "0.25"
 rodio = "0.20"
 
+# Cryptography (IPMSG Blowfish + RSA key exchange)
+blowfish = "0.9"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = "0.4"
+rsa = "0.9"
+rand = "0.8"
+hex = "0.4"
+
 [package]
 name = "lanchat"
 version.workspace = true

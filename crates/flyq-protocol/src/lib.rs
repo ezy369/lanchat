@@ -24,11 +24,17 @@
 //! ```
 
 pub mod command;
+pub mod crypto;
 pub mod feiq;
 pub mod packet;
 pub mod types;
 
 pub use command::{Command, compose_command, extract_flags, flags};
+pub use crypto::{
+    CryptoError, IpmsgKeyPair, blowfish_cbc_decrypt, blowfish_cbc_encrypt,
+    decrypt_extension, encrypt_extension, generate_session_key, iv_from_packet_no,
+    parse_public_key, DEFAULT_CAP_FLAGS, SESSION_KEY_LEN, ZERO_IV,
+};
 pub use feiq::{EmojiCode, FeiqVersion, FileAttachmentInfo, FileTransferRequest, RichText};
 pub use packet::{GroupPayload, Packet, PacketBuilder, PacketParser};
 pub use types::*;
