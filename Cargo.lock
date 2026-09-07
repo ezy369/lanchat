@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "flyq-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "flyq-network"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flyq-protocol",
@@ -2263,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "flyq-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "flyq-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "flyq-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "lanchat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "flyq-core",
