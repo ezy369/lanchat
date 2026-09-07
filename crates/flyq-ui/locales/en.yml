@@ -71,6 +71,9 @@ remark:
   save: "Save"
   cancel: "Cancel"
 
+overlay:
+  hint: "Drag to select · Enter to confirm · Esc to cancel"
+
 tray:
   show_window: "Show window"
   quit: "Quit"

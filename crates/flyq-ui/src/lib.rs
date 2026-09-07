@@ -14,6 +14,8 @@ pub mod app;
 pub mod chat;
 mod notify;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+pub mod overlay;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod screenshot;
 pub mod settings;
 pub mod sidebar;

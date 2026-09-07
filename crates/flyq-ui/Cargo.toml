@@ -25,3 +25,4 @@ rodio.workspace = true
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 xcap.workspace = true
+image.workspace = true

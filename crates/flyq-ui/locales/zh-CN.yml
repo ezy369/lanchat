@@ -71,6 +71,9 @@ remark:
   save: "保存"
   cancel: "取消"
 
+overlay:
+  hint: "拖拽选择区域 · Enter 确认 · Esc 取消"
+
 tray:
   show_window: "显示主窗口"
   quit: "退出"

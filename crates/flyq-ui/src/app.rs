@@ -16,8 +16,8 @@ use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
 use rust_i18n::t;
 use gpui::{
-    div, px, white, AnyElement, App, AsyncApp, ClickEvent, Context, Entity, ExternalPaths, Hsla,
-    PathPromptOptions, Window,
+    div, px, white, AnyElement, App, AsyncApp, Bounds, ClickEvent, Context, Entity, ExternalPaths,
+    Hsla, PathPromptOptions, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{InputEvent, InputState};
@@ -1167,6 +1167,9 @@ impl Render for LanChatApp {
             let ss_handler = handler.clone();
             let ss_rt = rt.clone();
             let ss_download_dir = self.handler.download_dir();
+            let ss_addr = addr;
+            let display_bounds: Option<Bounds<gpui::Pixels>> =
+                cx.primary_display().map(|d| d.bounds());
             chat::render_chat_panel(
                 Some(&name),
                 &messages,
@@ -1261,26 +1264,31 @@ impl Render for LanChatApp {
                         }
                     });
                 },
-                move |_, _, _| {
-                    // Screenshot: capture primary monitor → save → send as image.
-                    let handler = ss_handler.clone();
+                move |_, window, cx| {
+                    // Screenshot: capture → overlay crop UI → send.
+                    let Some(bounds) = display_bounds else {
+                        warn!("Cannot determine display bounds for screenshot overlay");
+                        return;
+                    };
+                    let temp_dir = ss_download_dir.join("temp");
                     let images_dir = ss_download_dir.join("images");
-                    ss_rt.spawn(async move {
-                        // Capture on a blocking thread (GDI/DXGI can block).
-                        let result = tokio::task::spawn_blocking(move || {
-                            crate::screenshot::capture_and_save(&images_dir)
-                        })
-                        .await;
-                        match result {
-                            Ok(Ok(path)) => {
-                                if let Err(e) = handler.send_image_message(addr, path).await {
-                                    warn!("Failed to send screenshot to {}: {}", addr, e);
-                                }
+                    match crate::screenshot::capture_to_temp(&temp_dir) {
+                        Ok(source) => {
+                            if let Err(e) = crate::overlay::ScreenshotOverlay::open(
+                                source,
+                                images_dir,
+                                ss_rt.clone(),
+                                ss_handler.clone(),
+                                ss_addr,
+                                bounds,
+                                window,
+                                cx,
+                            ) {
+                                warn!("Failed to open screenshot overlay: {}", e);
                             }
-                            Ok(Err(e)) => warn!("Screenshot failed: {}", e),
-                            Err(e) => warn!("Screenshot task panicked: {}", e),
                         }
-                    });
+                        Err(e) => warn!("Screenshot capture failed: {}", e),
+                    }
                 },
             )
         } else if let Some(ref gid) = selected_group {
