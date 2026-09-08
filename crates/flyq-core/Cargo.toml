@@ -21,3 +21,4 @@ chrono.workspace = true
 uuid.workspace = true
 hostname.workspace = true
 toml.workspace = true
+rsa = "0.9"

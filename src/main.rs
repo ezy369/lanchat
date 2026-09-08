@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use flyq_core::{AppConfig, EventHandler, UiEvent, run_event_loop};
 use flyq_network::{DiscoveryConfig, DiscoveryService, FileRegistry, PeerManager, Transport};
+use flyq_protocol::IpmsgKeyPair;
 use flyq_storage::Database;
 use flyq_ui::LanChatApp;
 use flyq_ui::tokio_runtime;
@@ -106,6 +107,11 @@ async fn bootstrap() -> (
 
     // UI event channel + handler.
     let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>(256);
+
+    // Generate RSA key pair for IPMSG_ENCOPT encrypted messaging.
+    let keypair = IpmsgKeyPair::generate().expect("Failed to generate RSA key pair");
+    tracing::info!("RSA-1024 key pair generated for encrypted messaging");
+
     let handler = Arc::new(EventHandler::new(
         local_id,
         db,
@@ -116,6 +122,7 @@ async fn bootstrap() -> (
         download_dir,
         local_name.clone(),
         local_host,
+        keypair,
     ));
 
     // Core event loop (network events -> storage + UI events).

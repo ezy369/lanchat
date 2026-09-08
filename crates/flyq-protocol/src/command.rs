@@ -61,6 +61,12 @@ pub enum Command {
 
     // ─── FeiQ extended commands ────────────────────────────────────────────
 
+    /// Request peer's RSA public key for encryption key exchange.
+    /// Extra: capability flags in decimal/hex.
+    GetPubKey = 0x72,
+    /// Response with RSA public key.
+    /// Extra: `<capFlags>:<publicKeyHex>` (EE-NNNN format).
+    AnsPubKey = 0x73,
     /// Unknown purpose (defined in FeiQ headers, not observed in use).
     OpenYou = 0x77,
     /// Typing indicator ON — sent while user is composing a message.
@@ -137,6 +143,8 @@ impl Command {
             0x60 => Command::GetFileData,
             0x61 => Command::ReleaseFiles,
             0x62 => Command::GetDirFiles,
+            0x72 => Command::GetPubKey,
+            0x73 => Command::AnsPubKey,
             0x77 => Command::OpenYou,
             0x79 => Command::TypingStart,
             0x7A => Command::TypingEnd,
@@ -155,7 +163,9 @@ impl Command {
     pub fn is_feiq_extension(self) -> bool {
         matches!(
             self,
-            Command::OpenYou
+            Command::GetPubKey
+                | Command::AnsPubKey
+                | Command::OpenYou
                 | Command::TypingStart
                 | Command::TypingEnd
                 | Command::SendImage

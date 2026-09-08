@@ -258,6 +258,74 @@ impl MessageSender {
         Ok(no)
     }
 
+    /// Send an encrypted message (IPMSG_ENCOPT).
+    ///
+    /// The `encrypted_ext` is the pre-computed extension string in the format
+    /// `<capFlags>:<encKey>:<encBody>`. The caller is responsible for all
+    /// cryptographic operations (session key generation, RSA + Blowfish).
+    pub async fn send_encrypted_message(
+        &self,
+        to: SocketAddr,
+        encrypted_ext: &str,
+        request_receipt: bool,
+    ) -> Result<u32, MessageError> {
+        let no = self.next_packet_no();
+        let mut cmd_flags = flags::IPMSG_ENCOPT | flags::IPMSG_UTF8OPT;
+        if request_receipt {
+            cmd_flags |= flags::IPMSG_SENDCHECKOPT;
+        }
+
+        let builder = if self.identity.use_feiq_version {
+            PacketBuilder::new_feiq(&self.identity.mac_address, self.identity.feiq_level)
+        } else {
+            PacketBuilder::new()
+        };
+
+        let packet = builder
+            .sender(&self.identity.username, &self.identity.hostname)
+            .packet_no(no)
+            .command(Command::SendMsg)
+            .flag(cmd_flags)
+            .extra(encrypted_ext)
+            .build();
+
+        self.send_packet(&packet, to).await?;
+        Ok(no)
+    }
+
+    /// Send an encrypted group message (IPMSG_ENCOPT + MULTICASTOPT).
+    ///
+    /// The `encrypted_ext` is the pre-computed extension string in the format
+    /// `<capFlags>:<encKey>:<encBody>`.
+    pub async fn send_encrypted_group_message(
+        &self,
+        to: SocketAddr,
+        encrypted_ext: &str,
+    ) -> Result<u32, MessageError> {
+        let no = self.next_packet_no();
+        let cmd_flags = flags::IPMSG_ENCOPT
+            | flags::IPMSG_MULTICASTOPT
+            | flags::IPMSG_UTF8OPT
+            | flags::IPMSG_SENDCHECKOPT;
+
+        let builder = if self.identity.use_feiq_version {
+            PacketBuilder::new_feiq(&self.identity.mac_address, self.identity.feiq_level)
+        } else {
+            PacketBuilder::new()
+        };
+
+        let packet = builder
+            .sender(&self.identity.username, &self.identity.hostname)
+            .packet_no(no)
+            .command(Command::GroupMsg)
+            .flag(cmd_flags)
+            .extra(encrypted_ext)
+            .build();
+
+        self.send_packet(&packet, to).await?;
+        Ok(no)
+    }
+
     // ─── Delivery & Read Receipts ───────────────────────────────────────
 
     /// Send a delivery receipt (RecvMsg) acknowledging receipt of a message.
@@ -333,6 +401,33 @@ impl MessageSender {
         let packet = self.build_with_no(Command::SendImage, flags::IPMSG_FILEATTACHOPT, Some(image_id), no);
         self.send_packet(&packet, to).await?;
         Ok(no)
+    }
+
+    // ─── Key Exchange (GETPUBKEY / ANSPUBKEY) ───────────────────────────
+
+    /// Send a GETPUBKEY request to a peer, asking for their RSA public key.
+    ///
+    /// The extra field carries our capability flags (hex-encoded) so the peer
+    /// knows which cipher suites we support.
+    pub async fn send_get_pub_key(&self, to: SocketAddr, cap_flags: u32) -> Result<(), MessageError> {
+        let extra = format!("{:x}", cap_flags);
+        let packet = self.build(Command::GetPubKey, 0, Some(&extra));
+        self.send_packet(&packet, to).await
+    }
+
+    /// Send an ANSPUBKEY response with our RSA public key.
+    ///
+    /// The extra field format is `<capFlags>:<publicKeyHex>` where capFlags is
+    /// hex-encoded and publicKeyHex is the `EE-NNNNNN` RSA key representation.
+    pub async fn send_ans_pub_key(
+        &self,
+        to: SocketAddr,
+        cap_flags: u32,
+        pub_key_hex: &str,
+    ) -> Result<(), MessageError> {
+        let extra = format!("{:x}:{}", cap_flags, pub_key_hex);
+        let packet = self.build(Command::AnsPubKey, 0, Some(&extra));
+        self.send_packet(&packet, to).await
     }
 
     // ─── User List Protocol ──────────────────────────────────────────────

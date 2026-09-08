@@ -9,8 +9,13 @@ use flyq_network::{
     ProgressCallback,
 };
 use flyq_protocol::command::flags;
-use flyq_protocol::{Command, GroupPayload, Packet, PeerInfo, UserStatus};
+use flyq_protocol::{
+    decrypt_extension, encrypt_extension, parse_public_key, Command, GroupPayload, Packet,
+    PeerInfo, UserStatus, DEFAULT_CAP_FLAGS, ZERO_IV,
+};
 use flyq_storage::{Database, Group, Page, StoredMessage};
+use rsa::RsaPublicKey;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -204,6 +209,10 @@ pub struct EventHandler {
     local_name: String,
     /// Our hostname, sent when requesting a file download.
     local_host: String,
+    /// Our RSA key pair for IPMSG_ENCOPT key exchange.
+    keypair: flyq_protocol::IpmsgKeyPair,
+    /// Cached peer RSA public keys, keyed by socket address.
+    peer_pub_keys: RwLock<HashMap<SocketAddr, RsaPublicKey>>,
 }
 
 impl EventHandler {
@@ -218,6 +227,7 @@ impl EventHandler {
         download_dir: PathBuf,
         local_name: String,
         local_host: String,
+        keypair: flyq_protocol::IpmsgKeyPair,
     ) -> Self {
         Self {
             local_id,
@@ -229,6 +239,8 @@ impl EventHandler {
             download_dir: RwLock::new(download_dir),
             local_name,
             local_host,
+            keypair,
+            peer_pub_keys: RwLock::new(HashMap::new()),
         }
     }
 
@@ -348,6 +360,8 @@ impl EventHandler {
             Command::GroupMsg => {
                 self.handle_group_msg(from, &packet).await;
             }
+            Command::GetPubKey => self.handle_get_pub_key(packet, from).await,
+            Command::AnsPubKey => self.handle_ans_pub_key(packet, from).await,
             Command::Unknown => {
                 debug!("Unknown command from {} (flags=0x{:08x})", from, packet.command_flags);
             }
@@ -355,8 +369,23 @@ impl EventHandler {
     }
 
     /// Handle an incoming chat message (SendMsg).
+    ///
+    /// If the packet carries the `IPMSG_ENCOPT` flag, the extra area is
+    /// decrypted with our RSA private key + Blowfish-CBC before processing.
     async fn handle_send_msg(&self, packet: Packet, from: SocketAddr) {
-        let content = packet.extra.clone().unwrap_or_default();
+        // Decrypt if the message is encrypted (IPMSG_ENCOPT flag).
+        let content = if packet.has_flag(flags::IPMSG_ENCOPT) {
+            let raw = packet.extra.as_deref().unwrap_or("");
+            match decrypt_extension(raw, &self.keypair, &ZERO_IV) {
+                Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                Err(e) => {
+                    warn!("Failed to decrypt message from {}: {}", from, e);
+                    packet.extra.clone().unwrap_or_default()
+                }
+            }
+        } else {
+            packet.extra.clone().unwrap_or_default()
+        };
         let timestamp = now_timestamp();
         let msg_id = Uuid::new_v4().to_string();
         let peer_id = format!("{}:{}", from.ip(), from.port());
@@ -570,6 +599,79 @@ impl EventHandler {
             "OpenYou from {} (sender={}, extra={:?}) — no-op (purpose unknown)",
             from, packet.sender_name, packet.extra
         );
+    }
+
+    // ─── Key Exchange (GETPUBKEY / ANSPUBKEY) ───────────────────────────
+
+    /// Handle a GETPUBKEY request: respond with our RSA public key.
+    ///
+    /// The peer asks for our public key so it can encrypt messages to us.
+    /// We reply with ANSPUBKEY carrying our capability flags and public key
+    /// in the `EE-NNNNNN` hex format.
+    async fn handle_get_pub_key(&self, _packet: Packet, from: SocketAddr) {
+        debug!("GetPubKey from {}: sending our public key", from);
+        let pub_key_hex = self.keypair.public_key_hex();
+        if let Err(e) = self
+            .sender
+            .send_ans_pub_key(from, DEFAULT_CAP_FLAGS, &pub_key_hex)
+            .await
+        {
+            warn!("Failed to send AnsPubKey to {}: {}", from, e);
+        }
+    }
+
+    /// Handle an ANSPUBKEY response: cache the peer's RSA public key.
+    ///
+    /// The extra field format is `<capFlags>:<publicKeyHex>`. We parse and
+    /// store the key so subsequent messages to this peer can be encrypted.
+    async fn handle_ans_pub_key(&self, packet: Packet, from: SocketAddr) {
+        let extra = match &packet.extra {
+            Some(e) => e.as_str(),
+            None => {
+                debug!("AnsPubKey from {} with no extra field", from);
+                return;
+            }
+        };
+
+        let Some((_cap_str, key_hex)) = extra.split_once(':') else {
+            warn!("AnsPubKey from {}: malformed extra (no colon)", from);
+            return;
+        };
+
+        match parse_public_key(key_hex) {
+            Ok(pub_key) => {
+                if let Ok(mut cache) = self.peer_pub_keys.write() {
+                    cache.insert(from, pub_key);
+                }
+                info!("Cached RSA public key for {}", from);
+            }
+            Err(e) => {
+                warn!("AnsPubKey from {}: failed to parse public key: {}", from, e);
+            }
+        }
+    }
+
+    /// Request a peer's RSA public key for encrypted messaging.
+    pub async fn request_pub_key(&self, to: SocketAddr) {
+        if let Err(e) = self.sender.send_get_pub_key(to, DEFAULT_CAP_FLAGS).await {
+            warn!("Failed to send GetPubKey to {}: {}", to, e);
+        }
+    }
+
+    /// Check whether we have a cached RSA public key for a peer.
+    pub fn has_peer_pub_key(&self, addr: &SocketAddr) -> bool {
+        self.peer_pub_keys
+            .read()
+            .map(|cache| cache.contains_key(addr))
+            .unwrap_or(false)
+    }
+
+    /// Retrieve a cloned copy of a peer's cached RSA public key.
+    pub fn get_peer_pub_key(&self, addr: &SocketAddr) -> Option<RsaPublicKey> {
+        self.peer_pub_keys
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(addr).cloned())
     }
 
     // ─── User List Protocol (BrIsGetList / OkGetList / GetList / AnsList) ──
@@ -868,19 +970,35 @@ impl EventHandler {
     /// Handle an incoming GroupMsg (0x23) — group chat message.
     ///
     /// Parses the extra field to extract group name and message text using
-    /// the `GroupPayload` format (`"{groupName}\0{messageText}"`). Matches
-    /// the group name to a local group; if no match is found, auto-creates
-    /// a new group with just the sender as member.
+    /// the `GroupPayload` format (`"{groupName}\0{messageText}"`). If the
+    /// packet has `IPMSG_ENCOPT`, the extra area is decrypted first.
+    /// Matches the group name to a local group; if no match is found,
+    /// auto-creates a new group with just the sender as member.
     async fn handle_group_msg(&self, from: SocketAddr, packet: &Packet) {
-        let extra = match &packet.extra {
-            Some(e) => e.as_str(),
-            None => {
-                debug!("GroupMsg from {} with no extra field", from);
-                return;
+        // Decrypt if the message is encrypted.
+        let extra_owned = if packet.has_flag(flags::IPMSG_ENCOPT) {
+            let raw = packet.extra.as_deref().unwrap_or("");
+            match decrypt_extension(raw, &self.keypair, &ZERO_IV) {
+                Ok(plaintext) => String::from_utf8_lossy(&plaintext).to_string(),
+                Err(e) => {
+                    warn!("Failed to decrypt group message from {}: {}", from, e);
+                    match &packet.extra {
+                        Some(e) => e.clone(),
+                        None => return,
+                    }
+                }
+            }
+        } else {
+            match &packet.extra {
+                Some(e) => e.clone(),
+                None => {
+                    debug!("GroupMsg from {} with no extra field", from);
+                    return;
+                }
             }
         };
 
-        let (group_name, content) = GroupPayload::parse_extra(extra);
+        let (group_name, content) = GroupPayload::parse_extra(&extra_owned);
 
         // Find or auto-create group by name.
         let group = match self.db.get_group_by_name(group_name).await {
@@ -959,6 +1077,9 @@ impl EventHandler {
 
     /// Send a chat message to a peer and persist it locally.
     ///
+    /// If the peer's RSA public key is cached, the message is encrypted with
+    /// Blowfish-CBC (IPMSG_ENCOPT). Otherwise it is sent in plaintext.
+    ///
     /// Returns the message ID and packet number.
     pub async fn send_chat_message(
         &self,
@@ -970,8 +1091,15 @@ impl EventHandler {
         let timestamp = now_timestamp();
         let peer_id = format!("{}:{}", to.ip(), to.port());
 
-        // Send over UDP.
-        let packet_no = self.sender.send_message(to, content, request_receipt).await?;
+        // Encrypt if we have the peer's public key.
+        let packet_no = if let Some(peer_key) = self.get_peer_pub_key(&to) {
+            let encrypted = encrypt_extension(content.as_bytes(), &peer_key, &ZERO_IV)?;
+            self.sender
+                .send_encrypted_message(to, &encrypted, request_receipt)
+                .await?
+        } else {
+            self.sender.send_message(to, content, request_receipt).await?
+        };
 
         // Persist locally.
         let stored = StoredMessage {
@@ -1006,9 +1134,10 @@ impl EventHandler {
 
     /// Send a group chat message to all members of a group.
     ///
-    /// Fans out `send_group_message` to every member address, persists the
-    /// message locally with `group_id`, and emits a `GroupMessageReceived`
-    /// event so the UI shows our own message in the group conversation.
+    /// Fans out to every member address. If a member's RSA public key is
+    /// cached, the message is encrypted (IPMSG_ENCOPT); otherwise plaintext.
+    /// Persists the message locally with `group_id` and emits a
+    /// `GroupMessageReceived` event so the UI shows our own message.
     pub async fn send_group_chat_message(
         &self,
         group_id: &str,
@@ -1025,14 +1154,34 @@ impl EventHandler {
         let timestamp = now_timestamp();
         let mut last_packet_no = 0u32;
 
-        // Fan-out: send to each member.
+        // Build the plaintext payload for group messages: "groupName\0text".
+        let group_plaintext = GroupPayload::build_extra(&group.name, content);
+
+        // Fan-out: send to each member (encrypted when possible).
         for member_addr_str in &group.members {
             if let Ok(addr) = member_addr_str.parse::<SocketAddr>() {
-                match self
-                    .sender
-                    .send_group_message(addr, &group.name, content)
-                    .await
-                {
+                let result = if let Some(peer_key) = self.get_peer_pub_key(&addr) {
+                    // Encrypt the group payload for this member.
+                    match encrypt_extension(group_plaintext.as_bytes(), &peer_key, &ZERO_IV) {
+                        Ok(encrypted) => {
+                            self.sender
+                                .send_encrypted_group_message(addr, &encrypted)
+                                .await
+                        }
+                        Err(e) => {
+                            warn!("Encryption failed for {}: {}, sending plaintext", addr, e);
+                            self.sender
+                                .send_group_message(addr, &group.name, content)
+                                .await
+                        }
+                    }
+                } else {
+                    self.sender
+                        .send_group_message(addr, &group.name, content)
+                        .await
+                };
+
+                match result {
                     Ok(no) => last_packet_no = no,
                     Err(e) => {
                         warn!("Failed to send group message to {}: {}", addr, e);
