@@ -186,6 +186,11 @@ pub enum UiEvent {
         addr: SocketAddr,
         remark: String,
     },
+    /// A peer's avatar path was loaded from the database.
+    AvatarLoaded {
+        addr: SocketAddr,
+        path: String,
+    },
 }
 
 /// Application event handler that bridges network events to storage and UI.
@@ -213,6 +218,8 @@ pub struct EventHandler {
     keypair: flyq_protocol::IpmsgKeyPair,
     /// Cached peer RSA public keys, keyed by socket address.
     peer_pub_keys: RwLock<HashMap<SocketAddr, RsaPublicKey>>,
+    /// Our local avatar file path (set by the user in settings).
+    avatar_file: RwLock<Option<String>>,
 }
 
 impl EventHandler {
@@ -241,6 +248,14 @@ impl EventHandler {
             local_host,
             keypair,
             peer_pub_keys: RwLock::new(HashMap::new()),
+            avatar_file: RwLock::new(None),
+        }
+    }
+
+    /// Set our local avatar file path (called from settings panel).
+    pub fn set_avatar_file(&self, path: Option<String>) {
+        if let Ok(mut guard) = self.avatar_file.write() {
+            *guard = path;
         }
     }
 
@@ -296,6 +311,7 @@ impl EventHandler {
             group: peer.group.clone(),
             last_seen: now_timestamp(),
             remark_name: None,
+            avatar_path: None,
         };
         if let Err(e) = self.db.upsert_peer(&stored).await {
             warn!("Failed to persist peer {}: {}", peer.name, e);
@@ -315,6 +331,17 @@ impl EventHandler {
                 .send(UiEvent::RemarkLoaded {
                     addr: peer_addr,
                     remark,
+                })
+                .await;
+        }
+
+        // If the peer has a stored avatar path, emit it so the UI can render it.
+        if let Some(path) = self.get_avatar_path(&peer_id).await {
+            let _ = self
+                .ui_tx
+                .send(UiEvent::AvatarLoaded {
+                    addr: peer_addr,
+                    path,
                 })
                 .await;
         }
@@ -362,6 +389,8 @@ impl EventHandler {
             }
             Command::GetPubKey => self.handle_get_pub_key(packet, from).await,
             Command::AnsPubKey => self.handle_ans_pub_key(packet, from).await,
+            Command::GetAvatar => self.handle_get_avatar(packet, from).await,
+            Command::AnsAvatar => self.handle_ans_avatar(packet, from).await,
             Command::Unknown => {
                 debug!("Unknown command from {} (flags=0x{:08x})", from, packet.command_flags);
             }
@@ -672,6 +701,112 @@ impl EventHandler {
             .read()
             .ok()
             .and_then(|cache| cache.get(addr).cloned())
+    }
+
+    // ─── Avatar Exchange (GETAVATAR / ANSAVATAR) ────────────────────────
+
+    /// Handle a GetAvatar request: respond with our avatar file ID if available.
+    ///
+    /// If we have a local avatar configured, register it in the FileRegistry
+    /// and send back the file ID via AnsAvatar so the peer can download it
+    /// over TCP. If no avatar is set, we ignore the request.
+    async fn handle_get_avatar(&self, _packet: Packet, from: SocketAddr) {
+        debug!("GetAvatar request from {}", from);
+
+        // Look up our own avatar path from config.
+        let avatar_path = match self.avatar_file.read().ok().and_then(|g| g.clone()) {
+            Some(path) => path,
+            None => {
+                debug!("No avatar configured, ignoring GetAvatar from {}", from);
+                return;
+            }
+        };
+
+        // Register the avatar file for TCP download.
+        let avatar_pathbuf = PathBuf::from(&avatar_path);
+        match self.registry.register(&avatar_pathbuf).await {
+            Ok(offer) => {
+                let file_id_hex = format!("{:08x}", offer.file_id);
+                if let Err(e) = self.sender.send_ans_avatar(from, &file_id_hex).await {
+                    warn!("Failed to send AnsAvatar to {}: {}", from, e);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to register avatar for {}: {}", from, e);
+            }
+        }
+    }
+
+    /// Handle an AnsAvatar response: download the peer's avatar via TCP.
+    ///
+    /// The extra field contains an 8-byte hex file ID. We download the avatar
+    /// bytes via GetFileData and save it to the local avatar cache directory.
+    async fn handle_ans_avatar(&self, packet: Packet, from: SocketAddr) {
+        let extra = match &packet.extra {
+            Some(e) => e.as_str(),
+            None => {
+                debug!("AnsAvatar from {} with no extra field", from);
+                return;
+            }
+        };
+
+        let file_id = match u32::from_str_radix(extra.trim(), 16) {
+            Ok(id) => id,
+            Err(_) => {
+                warn!("AnsAvatar from {}: invalid file ID {:?}", from, extra);
+                return;
+            }
+        };
+
+        info!("Downloading avatar (file_id={}) from {}", file_id, from);
+
+        // Ensure avatar cache directory exists.
+        let avatar_dir = self.download_dir().join("avatars");
+        if let Err(e) = std::fs::create_dir_all(&avatar_dir) {
+            warn!("Failed to create avatar dir: {}", e);
+            return;
+        }
+
+        let safe_name = format!("{}:{}", from.ip(), from.port()).replace([':', '/'], "_");
+        let dest = avatar_dir.join(format!("avatar_{}.png", safe_name));
+
+        // Download via TCP GetFileData (reuse the same mechanism as images).
+        match flyq_network::FileDownloader::download(
+            from,
+            file_id,
+            0,
+            u64::MAX, // Read until sender closes.
+            &dest,
+            &self.local_name,
+            &self.local_host,
+            None,
+        )
+        .await
+        {
+            Ok(_bytes) => {
+                info!("Avatar saved to {:?}", dest);
+                let peer_id = format!("{}:{}", from.ip(), from.port());
+                let path_str = dest.to_string_lossy().to_string();
+                self.db.set_avatar_path(&peer_id, Some(&path_str)).await.ok();
+                let _ = self
+                    .ui_tx
+                    .send(UiEvent::AvatarLoaded {
+                        addr: from,
+                        path: path_str,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                warn!("Failed to download avatar from {}: {}", from, e);
+            }
+        }
+    }
+
+    /// Request a peer's avatar image.
+    pub async fn request_avatar(&self, to: SocketAddr) {
+        if let Err(e) = self.sender.send_get_avatar(to).await {
+            warn!("Failed to send GetAvatar to {}: {}", to, e);
+        }
     }
 
     // ─── User List Protocol (BrIsGetList / OkGetList / GetList / AnsList) ──
@@ -1292,6 +1427,24 @@ impl EventHandler {
     pub async fn set_remark_name(&self, addr: &str, remark: Option<&str>) {
         if let Err(e) = self.db.set_remark_name(addr, remark).await {
             warn!("Failed to set remark for {}: {}", addr, e);
+        }
+    }
+
+    /// Look up the avatar image path for a peer.
+    pub async fn get_avatar_path(&self, addr: &str) -> Option<String> {
+        self.db
+            .get_peers()
+            .await
+            .ok()?
+            .into_iter()
+            .find(|p| p.addr == addr)
+            .and_then(|p| p.avatar_path)
+    }
+
+    /// Set (or clear) the avatar image path for a peer.
+    pub async fn set_avatar_path(&self, addr: &str, path: Option<&str>) {
+        if let Err(e) = self.db.set_avatar_path(addr, path).await {
+            warn!("Failed to set avatar for {}: {}", addr, e);
         }
     }
 

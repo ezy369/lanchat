@@ -35,6 +35,8 @@ pub struct StoredPeer {
     pub last_seen: i64,
     /// User-set display alias; `None` means use the peer's broadcast `name`.
     pub remark_name: Option<String>,
+    /// Path to the peer's avatar image on local disk; `None` means use default.
+    pub avatar_path: Option<String>,
 }
 
 /// Pagination request parameters.

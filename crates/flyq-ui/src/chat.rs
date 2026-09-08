@@ -17,6 +17,7 @@ use crate::app::{ChatMsg, MsgStatus, Palette};
 /// hint, and an input row with a send button wired to `on_send`.
 pub fn render_chat_panel(
     peer_name: Option<&str>,
+    peer_avatar: Option<&str>,
     messages: &[ChatMsg],
     typing: Option<&str>,
     input: &Entity<InputState>,
@@ -104,7 +105,7 @@ pub fn render_chat_panel(
     } else {
         let mut bubbles: Vec<AnyElement> = Vec::with_capacity(messages.len());
         for msg in messages {
-            bubbles.push(message_bubble(msg, palette));
+            bubbles.push(message_bubble(msg, peer_avatar, palette));
         }
         div()
             .id("message-list")
@@ -204,7 +205,7 @@ pub fn render_group_chat_panel(
     } else {
         let mut bubbles: Vec<AnyElement> = Vec::with_capacity(messages.len());
         for msg in messages {
-            bubbles.push(message_bubble(msg, palette));
+            bubbles.push(message_bubble(msg, None, palette));
         }
         div()
             .id("group-message-list")
@@ -243,7 +244,8 @@ pub fn render_group_chat_panel(
 }
 
 /// Render a single message bubble, aligned right for outgoing messages.
-fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
+/// For incoming messages, a small avatar is shown to the left of the bubble.
+fn message_bubble(msg: &ChatMsg, peer_avatar: Option<&str>, palette: Palette) -> AnyElement {
     let (bg, fg) = if msg.outgoing {
         (palette.primary, white())
     } else {
@@ -263,18 +265,11 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
         format!("{} · {}", time, msg.sender_name)
     };
 
-    let mut col = v_flex().max_w(px(460.0)).gap(px(2.0));
+    let mut col = v_flex().max_w(px(440.0)).gap(px(2.0));
     col = if msg.outgoing {
         col.items_end()
     } else {
         col.items_start()
-    };
-
-    let row = h_flex().w_full();
-    let row = if msg.outgoing {
-        row.justify_end()
-    } else {
-        row.justify_start()
     };
 
     // Render the bubble content: image or text.
@@ -315,16 +310,63 @@ fn message_bubble(msg: &ChatMsg, palette: Palette) -> AnyElement {
             .into_any_element()
     };
 
-    row.child(
-        col.child(content)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(palette.muted_foreground)
-                    .child(meta),
-            ),
-    )
-    .into_any_element()
+    let bubble_col = col
+        .child(content)
+        .child(
+            div()
+                .text_xs()
+                .text_color(palette.muted_foreground)
+                .child(meta),
+        );
+
+    // For incoming messages, show avatar to the left of the bubble.
+    if !msg.outgoing {
+        let initial = msg
+            .sender_name
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string();
+
+        let avatar_el = div()
+            .size(px(28.0))
+            .rounded_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(palette.muted)
+            .children(peer_avatar.map(|p| {
+                img(format!("file://{}", p))
+                    .size(px(28.0))
+                    .into_any_element()
+            }))
+            .when(peer_avatar.is_none(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(white())
+                        .child(initial),
+                )
+            });
+
+        h_flex()
+            .w_full()
+            .gap(px(8.0))
+            .items_start()
+            .child(avatar_el)
+            .child(bubble_col)
+            .into_any_element()
+    } else {
+        h_flex()
+            .w_full()
+            .justify_end()
+            .child(bubble_col)
+            .into_any_element()
+    }
 }
 
 /// Placeholder shown when no peer is selected.

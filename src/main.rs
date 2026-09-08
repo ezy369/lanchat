@@ -125,6 +125,11 @@ async fn bootstrap() -> (
         keypair,
     ));
 
+    // Restore custom avatar path from config.
+    if let Some(ref avatar_path) = app_config.avatar_file {
+        handler.set_avatar_file(Some(avatar_path.clone()));
+    }
+
     // Core event loop (network events -> storage + UI events).
     tokio::spawn(run_event_loop(Arc::clone(&handler), event_rx));
 

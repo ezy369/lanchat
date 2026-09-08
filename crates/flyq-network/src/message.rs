@@ -430,6 +430,26 @@ impl MessageSender {
         self.send_packet(&packet, to).await
     }
 
+    // ─── Avatar Exchange (GETAVATAR / ANSAVATAR) ────────────────────────
+
+    /// Request a peer's avatar image (LanChat custom extension).
+    pub async fn send_get_avatar(&self, to: SocketAddr) -> Result<(), MessageError> {
+        let packet = self.build(Command::GetAvatar, 0, None);
+        self.send_packet(&packet, to).await
+    }
+
+    /// Respond with our avatar file ID for TCP download.
+    ///
+    /// `file_id_hex` is the 8-byte hex file ID registered in the FileRegistry.
+    pub async fn send_ans_avatar(
+        &self,
+        to: SocketAddr,
+        file_id_hex: &str,
+    ) -> Result<(), MessageError> {
+        let packet = self.build(Command::AnsAvatar, 0, Some(file_id_hex));
+        self.send_packet(&packet, to).await
+    }
+
     // ─── User List Protocol ──────────────────────────────────────────────
 
     /// Broadcast a request for peer lists (BrIsGetList).

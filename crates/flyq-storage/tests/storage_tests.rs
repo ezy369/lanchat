@@ -319,6 +319,7 @@ async fn test_get_conversations() {
         group: Some("dev".to_string()),
         last_seen: 1000,
         remark_name: None,
+        avatar_path: None,
     };
     let peer2 = StoredPeer {
         addr: "peer2".to_string(),
@@ -327,6 +328,7 @@ async fn test_get_conversations() {
         group: None,
         last_seen: 1001,
         remark_name: None,
+        avatar_path: None,
     };
     db.upsert_peer(&peer1).await.unwrap();
     db.upsert_peer(&peer2).await.unwrap();
@@ -406,6 +408,7 @@ async fn test_peer_crud() {
         group: Some("engineering".to_string()),
         last_seen: 1000,
         remark_name: None,
+        avatar_path: None,
     };
 
     db.upsert_peer(&peer).await.unwrap();
@@ -450,6 +453,7 @@ async fn test_remark_name_roundtrip() {
         group: None,
         last_seen: 1000,
         remark_name: None,
+        avatar_path: None,
     };
     db.upsert_peer(&peer).await.unwrap();
 
@@ -479,6 +483,49 @@ async fn test_remark_name_roundtrip() {
     db.set_remark_name("192.168.1.50:2425", None).await.unwrap();
     let peers = db.get_peers().await.unwrap();
     assert_eq!(peers[0].remark_name, None);
+}
+
+#[tokio::test]
+async fn test_avatar_path_roundtrip() {
+    let db = setup_db().await;
+
+    let peer = StoredPeer {
+        addr: "192.168.1.60:2425".to_string(),
+        name: "Bob".to_string(),
+        host: "bob-pc".to_string(),
+        group: None,
+        last_seen: 1000,
+        remark_name: None,
+        avatar_path: None,
+    };
+    db.upsert_peer(&peer).await.unwrap();
+
+    // Initially no avatar.
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].avatar_path, None);
+
+    // Set avatar path.
+    db.set_avatar_path("192.168.1.60:2425", Some("/avatars/bob.png"))
+        .await
+        .unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].avatar_path.as_deref(), Some("/avatars/bob.png"));
+
+    // Upsert should preserve the avatar (not overwrite it).
+    let updated = StoredPeer {
+        name: "Bob2".to_string(),
+        last_seen: 2000,
+        ..peer.clone()
+    };
+    db.upsert_peer(&updated).await.unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].name, "Bob2");
+    assert_eq!(peers[0].avatar_path.as_deref(), Some("/avatars/bob.png"));
+
+    // Clear the avatar.
+    db.set_avatar_path("192.168.1.60:2425", None).await.unwrap();
+    let peers = db.get_peers().await.unwrap();
+    assert_eq!(peers[0].avatar_path, None);
 }
 
 // ─── FTS Index Rebuild Test ─────────────────────────────────────────────────

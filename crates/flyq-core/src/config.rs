@@ -50,6 +50,9 @@ pub struct AppConfig {
     pub sound_enabled: bool,
     /// Theme mode: "system" (follow OS), "light", or "dark".
     pub theme_mode: String,
+    /// Path to the user's custom avatar image on local disk; `None` means use default.
+    #[serde(default)]
+    pub avatar_file: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -62,6 +65,7 @@ impl Default for AppConfig {
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         }
     }
 }
@@ -239,6 +243,7 @@ mod tests {
             language: "en".to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         cfg.save_to(&path).expect("save should succeed");
 
@@ -297,6 +302,7 @@ mod tests {
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -315,6 +321,7 @@ mod tests {
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         let changed = cfg.normalize();
         assert!(changed);
@@ -331,6 +338,7 @@ mod tests {
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         assert!(!cfg.normalize());
     }
@@ -351,6 +359,7 @@ mod tests {
             language: "ja-JP".to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         assert!(cfg.normalize());
         assert_eq!(cfg.language, DEFAULT_LOCALE);
@@ -364,6 +373,7 @@ mod tests {
             language: "en".to_string(),
             sound_enabled: true,
             theme_mode: DEFAULT_THEME_MODE.to_string(),
+            avatar_file: None,
         };
         assert!(!cfg2.normalize());
         assert_eq!(cfg2.language, "en");
@@ -379,6 +389,7 @@ mod tests {
             language: DEFAULT_LOCALE.to_string(),
             sound_enabled: true,
             theme_mode: "neon".to_string(),
+            avatar_file: None,
         };
         assert!(cfg.normalize());
         assert_eq!(cfg.theme_mode, DEFAULT_THEME_MODE);

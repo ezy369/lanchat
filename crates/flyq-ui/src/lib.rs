@@ -11,6 +11,7 @@
 //! bridged into GPUI via the [`tokio_runtime`] module.
 
 pub mod app;
+pub mod avatar_picker;
 pub mod chat;
 mod notify;
 #[cfg(any(target_os = "windows", target_os = "macos"))]

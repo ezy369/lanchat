@@ -55,6 +55,9 @@ settings:
   theme_system: "跟随系统"
   theme_light: "亮色"
   theme_dark: "暗色"
+  avatar: "头像"
+  avatar_choose: "选择图片"
+  avatar_clear: "清除"
 
 notify:
   app_name: "LanChat"

@@ -5,13 +5,15 @@
 //! storage operations and UI notifications.
 
 pub mod app_state;
+pub mod avatar;
 pub mod config;
 pub mod handlers;
 
 pub use app_state::AppState;
+pub use avatar::{generate_avatar_svg, get_or_create_default_avatar, AVATAR_SIZE};
 pub use config::{
     AppConfig, DEFAULT_LOCALE, DEFAULT_PORT, DEFAULT_THEME_MODE, SUPPORTED_LOCALES,
-    SUPPORTED_THEME_MODES,
+    SUPPORTED_THEME_MODES, config_dir,
 };
 pub use handlers::{run_event_loop, EventHandler, HistoryMsg, IncomingFile, UiEvent};
 pub use flyq_storage::Group;

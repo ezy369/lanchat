@@ -3,7 +3,7 @@
 use flyq_protocol::{PeerInfo, UserStatus};
 use gpui::prelude::*;
 use rust_i18n::t;
-use gpui::{div, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
+use gpui::{div, img, px, white, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{h_flex, v_flex, InteractiveElementExt, Sizable};
@@ -182,6 +182,7 @@ pub fn peer_row(
     selected: bool,
     typing: Option<&str>,
     remark: Option<&str>,
+    avatar_path: Option<&str>,
     palette: Palette,
     on_select: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_edit_remark: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -268,11 +269,51 @@ pub fn peer_row(
             .gap(px(9.0))
             .items_center()
             .child(
+                // Avatar with status indicator overlay.
                 div()
-                    .size(px(9.0))
-                    .rounded_full()
+                    .relative()
+                    .size(px(36.0))
                     .flex_shrink_0()
-                    .bg(dot_color),
+                    .child(
+                        div()
+                            .size(px(36.0))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(palette.muted)
+                            .children(avatar_path.map(|p| {
+                                img(format!("file://{}", p))
+                                    .size(px(36.0))
+                                    .into_any_element()
+                            }))
+                            .when(avatar_path.is_none(), |el| {
+                                let initial = peer.name.chars().next()
+                                    .unwrap_or('?')
+                                    .to_uppercase()
+                                    .to_string();
+                                el.child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(white())
+                                        .child(initial),
+                                )
+                            }),
+                    )
+                    .child(
+                        // Status dot in bottom-right corner.
+                        div()
+                            .absolute()
+                            .bottom(px(-1.0))
+                            .right(px(-1.0))
+                            .size(px(12.0))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(palette.background)
+                            .bg(dot_color),
+                    ),
             )
             .child(
                 v_flex()

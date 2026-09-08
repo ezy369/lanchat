@@ -204,6 +204,8 @@ pub struct LanChatApp {
     settings_sound_enabled: bool,
     /// Settings form: theme mode ("system", "light", "dark").
     settings_theme_mode: String,
+    /// Settings form: path to user's custom avatar image (None = default).
+    settings_avatar_path: Option<String>,
     /// Known chat groups.
     groups: Vec<flyq_core::Group>,
     /// Group message history keyed by group_id.
@@ -215,6 +217,8 @@ pub struct LanChatApp {
     group_history_loaded: HashSet<String>,
     /// User-set remark names for peers, keyed by address.
     remark_names: HashMap<SocketAddr, String>,
+    /// Cached avatar file paths for peers, keyed by address.
+    avatar_paths: HashMap<SocketAddr, String>,
     /// Address of the peer whose remark is currently being edited (if any).
     remark_editing: Option<SocketAddr>,
     /// Input state for the inline remark editor.
@@ -259,6 +263,7 @@ impl LanChatApp {
         let initial_language = config.language.clone();
         let initial_sound = config.sound_enabled;
         let initial_theme_mode = config.theme_mode.clone();
+        let initial_avatar = config.avatar_file.clone();
         let remark_input = cx.new(|cx| InputState::new(window, cx));
 
         // Enter sends the message; other input events are ignored for now.
@@ -313,11 +318,13 @@ impl LanChatApp {
             settings_language: initial_language,
             settings_sound_enabled: initial_sound,
             settings_theme_mode: initial_theme_mode,
+            settings_avatar_path: initial_avatar,
             groups: Vec::new(),
             group_conversations: HashMap::new(),
             selected_group: None,
             group_history_loaded: HashSet::new(),
             remark_names: HashMap::new(),
+            avatar_paths: HashMap::new(),
             remark_editing: None,
             remark_input,
         };
@@ -687,6 +694,9 @@ impl LanChatApp {
             UiEvent::RemarkLoaded { addr, remark } => {
                 self.remark_names.insert(addr, remark);
             }
+            UiEvent::AvatarLoaded { addr, path } => {
+                self.avatar_paths.insert(addr, path);
+            }
         }
         cx.notify();
     }
@@ -895,6 +905,7 @@ impl LanChatApp {
         self.settings_language = self.config.language.clone();
         self.settings_sound_enabled = self.config.sound_enabled;
         self.settings_theme_mode = self.config.theme_mode.clone();
+        self.settings_avatar_path = self.config.avatar_file.clone();
         cx.notify();
     }
 
@@ -999,6 +1010,7 @@ impl LanChatApp {
             language: self.settings_language.clone(),
             sound_enabled: self.settings_sound_enabled,
             theme_mode: self.settings_theme_mode.clone(),
+            avatar_file: self.settings_avatar_path.clone(),
         };
         config.normalize();
 
@@ -1009,6 +1021,9 @@ impl LanChatApp {
                 config.download_dir, e
             );
         }
+
+        // Apply avatar file to the handler so peers can request it.
+        self.handler.set_avatar_file(config.avatar_file.clone());
 
         // Apply locale change live so the UI updates immediately.
         if config.language != self.config.language {
@@ -1129,6 +1144,7 @@ impl Render for LanChatApp {
             let is_selected = Some(addr) == selected;
             let typing = self.typing.get(&addr).cloned();
             let remark = self.remark_names.get(&addr).cloned();
+            let avatar = self.avatar_paths.get(&addr).cloned();
             let is_editing = self.remark_editing == Some(addr);
             let row_this = this.clone();
             let row_input = input_entity.clone();
@@ -1141,6 +1157,7 @@ impl Render for LanChatApp {
                 is_selected,
                 typing.as_deref(),
                 remark.as_deref(),
+                avatar.as_deref(),
                 palette,
                 move |_, window, cx| {
                     row_this.update(cx, |app, cx| app.select_peer(addr, cx));
@@ -1208,6 +1225,7 @@ impl Render for LanChatApp {
             let name = self.peer_name(&addr);
             let messages = self.conversations.get(&addr).cloned().unwrap_or_default();
             let typing = self.typing.get(&addr).cloned();
+            let peer_avatar = self.avatar_paths.get(&addr).cloned();
             let send_this = this.clone();
             let send_input = input_entity.clone();
             let send_handler = handler.clone();
@@ -1228,6 +1246,7 @@ impl Render for LanChatApp {
                 cx.primary_display().map(|d| d.bounds());
             chat::render_chat_panel(
                 Some(&name),
+                peer_avatar.as_deref(),
                 &messages,
                 typing.as_deref(),
                 &self.input,
@@ -1375,6 +1394,7 @@ impl Render for LanChatApp {
             )
         } else {
             chat::render_chat_panel(
+                None,
                 None,
                 &[],
                 None,
@@ -1678,9 +1698,13 @@ impl Render for LanChatApp {
             let lang_this = this.clone();
             let sound_this = this.clone();
             let theme_this = this.clone();
+            let avatar_choose_this = this.clone();
+            let avatar_clear_this = this.clone();
             let current_lang = self.settings_language.clone();
             let current_sound = self.settings_sound_enabled;
             let current_theme = self.settings_theme_mode.clone();
+            let current_avatar = self.settings_avatar_path.clone();
+            let avatar_rt = self.rt.clone();
             let on_lang_change: std::sync::Arc<dyn Fn(&str, &mut App) + 'static> = std::sync::Arc::new(move |lang: &str, cx: &mut App| {
                 lang_this.update(cx, |app, cx| {
                     app.settings_language = lang.to_string();
@@ -1699,6 +1723,54 @@ impl Render for LanChatApp {
                     cx.notify();
                 });
             });
+            let on_avatar_choose = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                let rx = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: None,
+                });
+                let avatar_this = avatar_choose_this.clone();
+                let rt = avatar_rt.clone();
+                avatar_this.update(cx, |_, cx| {
+                    let weak = cx.entity().downgrade();
+                    cx.spawn(async move |_this, cx| {
+                        match rx.await {
+                            Ok(Ok(Some(paths))) if !paths.is_empty() => {
+                                let source = paths.into_iter().next().unwrap();
+                                // Prepare the avatar: crop to square + resize.
+                                let avatar_dir = flyq_core::config_dir().join("avatars");
+                                let dest = avatar_dir.join("my_avatar.png");
+                                match rt.spawn_blocking(move || {
+                                    crate::avatar_picker::prepare_avatar(&source, &dest)
+                                }).await {
+                                    Ok(Ok(path)) => {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        let _ = weak.update(cx, |app, cx| {
+                                            app.settings_avatar_path = Some(path_str);
+                                            cx.notify();
+                                        });
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!("Avatar preparation failed: {}", e);
+                                    }
+                                    Err(e) => {
+                                        warn!("Avatar spawn failed: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(Err(e)) => warn!("File picker error: {}", e),
+                            _ => {}
+                        }
+                    }).detach();
+                });
+            };
+            let on_avatar_clear = move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                avatar_clear_this.update(cx, |app, cx| {
+                    app.settings_avatar_path = None;
+                    cx.notify();
+                });
+            };
             let modal = settings::render_settings_modal(
                 &self.settings_nickname,
                 &self.settings_download,
@@ -1706,6 +1778,7 @@ impl Render for LanChatApp {
                 &current_lang,
                 current_sound,
                 &current_theme,
+                current_avatar.as_deref(),
                 palette,
                 move |_, _, cx| {
                     save_this.update(cx, |app, cx| app.save_settings(cx));
@@ -1716,6 +1789,8 @@ impl Render for LanChatApp {
                 on_lang_change,
                 on_sound_toggle,
                 on_theme_change,
+                on_avatar_choose,
+                on_avatar_clear,
             );
             root = root.child(modal);
         }

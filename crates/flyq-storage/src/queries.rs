@@ -549,13 +549,13 @@ impl Database {
     /// Insert or update a peer record.
     ///
     /// On conflict (peer already exists), updates name/host/grp/last_seen but
-    /// preserves any user-set `remark_name`.
+    /// preserves any user-set `remark_name` and `avatar_path`.
     pub async fn upsert_peer(&self, peer: &StoredPeer) -> Result<(), DbError> {
         let mut stmt = self
             .conn
             .prepare(
-                "INSERT INTO peers (addr, name, host, grp, last_seen, remark_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO peers (addr, name, host, grp, last_seen, remark_name, avatar_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(addr) DO UPDATE SET
                     name = ?2, host = ?3, grp = ?4, last_seen = ?5",
             )
@@ -567,6 +567,7 @@ impl Database {
             peer.group.as_deref().unwrap_or(""),
             peer.last_seen,
             peer.remark_name.as_deref(),
+            peer.avatar_path.as_deref(),
         ))
         .await?;
         Ok(())
@@ -576,7 +577,7 @@ impl Database {
     pub async fn get_peers(&self) -> Result<Vec<StoredPeer>, DbError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT addr, name, host, grp, last_seen, remark_name FROM peers ORDER BY name")
+            .prepare("SELECT addr, name, host, grp, last_seen, remark_name, avatar_path FROM peers ORDER BY name")
             .await?;
 
         let mut rows = stmt.query(()).await?;
@@ -585,6 +586,7 @@ impl Database {
         while let Some(row) = rows.next().await? {
             let grp: String = row.get(3)?;
             let remark: Option<String> = row.get(5)?;
+            let avatar: Option<String> = row.get(6)?;
             peers.push(StoredPeer {
                 addr: row.get::<String>(0)?,
                 name: row.get::<String>(1)?,
@@ -592,6 +594,7 @@ impl Database {
                 group: if grp.is_empty() { None } else { Some(grp) },
                 last_seen: row.get::<i64>(4)?,
                 remark_name: remark.filter(|s| !s.is_empty()),
+                avatar_path: avatar.filter(|s| !s.is_empty()),
             });
         }
 
@@ -608,6 +611,18 @@ impl Database {
             .execute(
                 "UPDATE peers SET remark_name = ?1 WHERE addr = ?2",
                 (remark_value, addr),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear) the avatar image path for a peer.
+    pub async fn set_avatar_path(&self, addr: &str, path: Option<&str>) -> Result<(), DbError> {
+        let path_value = path.filter(|s| !s.is_empty());
+        self.conn
+            .execute(
+                "UPDATE peers SET avatar_path = ?1 WHERE addr = ?2",
+                (path_value, addr),
             )
             .await?;
         Ok(())

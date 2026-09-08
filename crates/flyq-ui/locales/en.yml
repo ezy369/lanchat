@@ -55,6 +55,9 @@ settings:
   theme_system: "System"
   theme_light: "Light"
   theme_dark: "Dark"
+  avatar: "Avatar"
+  avatar_choose: "Choose image"
+  avatar_clear: "Clear"
 
 notify:
   app_name: "LanChat"

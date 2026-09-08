@@ -9,7 +9,7 @@
 
 use flyq_core::{SUPPORTED_LOCALES, SUPPORTED_THEME_MODES};
 use gpui::prelude::*;
-use gpui::{div, hsla, px, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
+use gpui::{div, hsla, img, px, AnyElement, App, ClickEvent, Entity, FontWeight, Window};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{h_flex, v_flex};
@@ -49,12 +49,15 @@ pub fn render_settings_modal(
     selected_language: &str,
     sound_enabled: bool,
     selected_theme: &str,
+    avatar_path: Option<&str>,
     palette: Palette,
     on_save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_cancel: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_language_change: Arc<dyn Fn(&str, &mut App) + 'static>,
     on_sound_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_theme_change: Arc<dyn Fn(&str, &mut App) + 'static>,
+    on_avatar_choose: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_avatar_clear: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     // Build the language toggle row.
     let lang_label = div()
@@ -131,6 +134,62 @@ pub fn render_settings_modal(
                 .font_weight(FontWeight::BOLD)
                 .text_color(palette.foreground)
                 .child(t!("settings.title").to_string()),
+        )
+        .child(
+            // Avatar picker row: preview circle + choose/clear buttons.
+            h_flex()
+                .w_full()
+                .gap(px(12.0))
+                .items_center()
+                .child(
+                    div()
+                        .size(px(56.0))
+                        .rounded(px(28.0))
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(palette.muted)
+                        .border_1()
+                        .border_color(palette.border)
+                        .children(avatar_path.map(|p| {
+                            img(format!("file://{}", p))
+                                .size(px(56.0))
+                                .into_any_element()
+                        }))
+                        .when(avatar_path.is_none(), |el| {
+                            el.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(palette.muted_foreground)
+                                    .child("?"),
+                            )
+                        }),
+                )
+                .child(
+                    v_flex()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(palette.muted_foreground)
+                                .child(t!("settings.avatar").to_string()),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(6.0))
+                                .child(
+                                    Button::new("avatar-choose-btn")
+                                        .label(&t!("settings.avatar_choose").to_string())
+                                        .on_click(on_avatar_choose),
+                                )
+                                .child(
+                                    Button::new("avatar-clear-btn")
+                                        .label(&t!("settings.avatar_clear").to_string())
+                                        .on_click(on_avatar_clear),
+                                ),
+                        ),
+                ),
         )
         .child(field(&t!("settings.nickname"), nickname, palette))
         .child(field(&t!("settings.download_dir"), download_dir, palette))

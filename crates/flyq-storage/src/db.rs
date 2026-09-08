@@ -132,6 +132,14 @@ impl Database {
             .execute_batch("ALTER TABLE peers ADD COLUMN remark_name TEXT;")
             .await;
 
+        // M13: add avatar_path column for custom peer avatars.
+        // NULL means "use default initial-based avatar"; non-NULL points to
+        // a local image file path (128x128 PNG/JPEG).
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE peers ADD COLUMN avatar_path TEXT;")
+            .await;
+
         info!("Database migrations completed");
         Ok(())
     }

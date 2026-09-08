@@ -67,6 +67,12 @@ pub enum Command {
     /// Response with RSA public key.
     /// Extra: `<capFlags>:<publicKeyHex>` (EE-NNNN format).
     AnsPubKey = 0x73,
+    /// Request peer's avatar image (LanChat custom extension).
+    /// Extra: empty or capability hint.
+    GetAvatar = 0x74,
+    /// Response with avatar file ID for TCP download (LanChat custom extension).
+    /// Extra: 8-byte hex file ID (same format as SendImage).
+    AnsAvatar = 0x75,
     /// Unknown purpose (defined in FeiQ headers, not observed in use).
     OpenYou = 0x77,
     /// Typing indicator ON — sent while user is composing a message.
@@ -145,6 +151,8 @@ impl Command {
             0x62 => Command::GetDirFiles,
             0x72 => Command::GetPubKey,
             0x73 => Command::AnsPubKey,
+            0x74 => Command::GetAvatar,
+            0x75 => Command::AnsAvatar,
             0x77 => Command::OpenYou,
             0x79 => Command::TypingStart,
             0x7A => Command::TypingEnd,
@@ -165,6 +173,8 @@ impl Command {
             self,
             Command::GetPubKey
                 | Command::AnsPubKey
+                | Command::GetAvatar
+                | Command::AnsAvatar
                 | Command::OpenYou
                 | Command::TypingStart
                 | Command::TypingEnd
